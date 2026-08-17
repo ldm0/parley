@@ -15,7 +15,7 @@ use super::style::{Brush, FontFeature, FontVariation};
 use crate::analysis::cluster::{Char, CharCluster, Status};
 use crate::analysis::{AnalysisDataSources, CharInfo};
 use crate::convert::script_to_harfrust;
-use crate::inline_box::InlineBox;
+use crate::inline_box::InlineBoxInput;
 use crate::lru_cache::LruCache;
 use crate::util::nearly_eq;
 use crate::{FontData, convert};
@@ -66,7 +66,7 @@ pub(crate) fn shape_text<'a, B: Brush>(
     rcx: &'a ResolveContext,
     mut fq: Query<'a>,
     styles: &'a [ResolvedStyle<B>],
-    inline_boxes: &[InlineBox],
+    inline_boxes: &[InlineBoxInput],
     infos: &[(CharInfo, u16)],
     levels: &[u8],
     scx: &mut ShapeContext,
@@ -149,7 +149,7 @@ pub(crate) fn shape_text<'a, B: Brush>(
         //     break the run due to the presence of an inline box.
         let mut deferred_boxes: Option<RangeInclusive<usize>> = None;
         while let Some((box_idx, inline_box)) = current_box {
-            if inline_box.index == byte_index {
+            if inline_box.inline_box.index == byte_index {
                 break_run = true;
                 if let Some(boxes) = &mut deferred_boxes {
                     deferred_boxes = Some((*boxes.start())..=box_idx);

@@ -13,8 +13,9 @@ use alloc::string::String;
 use core::ops::{Bound, Range, RangeBounds};
 
 use crate::InlineBoxKind;
-use crate::inline_box::InlineBox;
+use crate::inline_box::{InlineBox, InlineBoxInput};
 use crate::resolve::{ResolvedStyle, StyleRun, tree::ItemKind};
+use crate::style::TextWrapMode;
 
 /// Builder for constructing a text layout with ranged attributes.
 #[must_use]
@@ -47,10 +48,24 @@ impl<B: Brush> RangedBuilder<'_, B> {
     }
 
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.lcx.inline_boxes.push(inline_box);
+        push_inline_box_input(self.lcx, inline_box, None);
+    }
+
+    /// Adds an inline box and changes the wrapping mode after the box.
+    ///
+    /// This is intended for [`InlineStart`](crate::InlineBoxKind::InlineStart)
+    /// and [`InlineEnd`](crate::InlineBoxKind::InlineEnd) boxes that model
+    /// entering or leaving a styled inline span.
+    pub fn push_inline_box_with_text_wrap_mode(
+        &mut self,
+        inline_box: InlineBox,
+        text_wrap_mode_after: TextWrapMode,
+    ) {
+        push_inline_box_input(self.lcx, inline_box, Some(text_wrap_mode_after));
     }
 
     pub fn build_into(self, layout: &mut Layout<B>, text: impl AsRef<str>) {
+        let initial_text_wrap_mode = self.lcx.ranged_style_builder.root_text_wrap_mode();
         // Apply RangedStyleBuilder styles directly to style-table/style-run state.
         self.lcx
             .ranged_style_builder
@@ -64,6 +79,7 @@ impl<B: Brush> RangedBuilder<'_, B> {
             text.as_ref(),
             self.lcx,
             self.fcx,
+            Some(initial_text_wrap_mode),
         );
     }
 
@@ -84,6 +100,7 @@ pub struct StyleRunBuilder<'a, B: Brush> {
     pub(crate) lcx: &'a mut LayoutContext<B>,
     pub(crate) fcx: &'a mut FontContext,
     pub(crate) cursor: usize,
+    pub(crate) initial_text_wrap_mode: Option<TextWrapMode>,
 }
 
 impl<B: Brush> StyleRunBuilder<'_, B> {
@@ -139,7 +156,29 @@ impl<B: Brush> StyleRunBuilder<'_, B> {
     }
 
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.lcx.inline_boxes.push(inline_box);
+        push_inline_box_input(self.lcx, inline_box, None);
+    }
+
+    /// Sets the wrapping mode at the start of the paragraph.
+    ///
+    /// Callers that construct indexed style runs should provide the style of
+    /// the inline formatting-context root. It can differ from the first text
+    /// run when the paragraph begins with a nested inline.
+    pub fn set_initial_text_wrap_mode(&mut self, text_wrap_mode: TextWrapMode) {
+        self.initial_text_wrap_mode = Some(text_wrap_mode);
+    }
+
+    /// Adds an inline box and changes the wrapping mode after the box.
+    ///
+    /// This is intended for [`InlineStart`](crate::InlineBoxKind::InlineStart)
+    /// and [`InlineEnd`](crate::InlineBoxKind::InlineEnd) boxes that model
+    /// entering or leaving a styled inline span.
+    pub fn push_inline_box_with_text_wrap_mode(
+        &mut self,
+        inline_box: InlineBox,
+        text_wrap_mode_after: TextWrapMode,
+    ) {
+        push_inline_box_input(self.lcx, inline_box, Some(text_wrap_mode_after));
     }
 
     pub fn build_into(self, layout: &mut Layout<B>, text: impl AsRef<str>) {
@@ -154,6 +193,7 @@ impl<B: Brush> StyleRunBuilder<'_, B> {
             text.as_ref(),
             self.lcx,
             self.fcx,
+            self.initial_text_wrap_mode,
         );
     }
 
@@ -171,6 +211,7 @@ pub struct TreeBuilder<'a, B: Brush> {
     pub(crate) quantize: bool,
     pub(crate) lcx: &'a mut LayoutContext<B>,
     pub(crate) fcx: &'a mut FontContext,
+    pub(crate) initial_text_wrap_mode: Option<TextWrapMode>,
 }
 
 impl<B: Brush> TreeBuilder<'_, B> {
@@ -204,7 +245,11 @@ impl<B: Brush> TreeBuilder<'_, B> {
         self.lcx.tree_style_builder.push_text(text);
     }
 
-    pub fn push_inline_box(&mut self, mut inline_box: InlineBox) {
+    fn push_inline_box_input(
+        &mut self,
+        mut inline_box: InlineBox,
+        text_wrap_mode_after: Option<TextWrapMode>,
+    ) {
         if inline_box.kind == InlineBoxKind::InFlow {
             self.lcx.tree_style_builder.push_uncommitted_text(false);
             self.lcx.tree_style_builder.set_is_span_first(false);
@@ -215,7 +260,24 @@ impl<B: Brush> TreeBuilder<'_, B> {
 
         // TODO: arrange type better here to factor out the index
         inline_box.index = self.lcx.tree_style_builder.current_text_len();
-        self.lcx.inline_boxes.push(inline_box);
+        push_inline_box_input(self.lcx, inline_box, text_wrap_mode_after);
+    }
+
+    pub fn push_inline_box(&mut self, inline_box: InlineBox) {
+        self.push_inline_box_input(inline_box, None);
+    }
+
+    /// Adds an inline box and changes the wrapping mode after the box.
+    ///
+    /// This is intended for [`InlineStart`](crate::InlineBoxKind::InlineStart)
+    /// and [`InlineEnd`](crate::InlineBoxKind::InlineEnd) boxes that model
+    /// entering or leaving a styled inline span.
+    pub fn push_inline_box_with_text_wrap_mode(
+        &mut self,
+        inline_box: InlineBox,
+        text_wrap_mode_after: TextWrapMode,
+    ) {
+        self.push_inline_box_input(inline_box, Some(text_wrap_mode_after));
     }
 
     pub fn set_white_space_mode(&mut self, white_space_collapse: WhiteSpaceCollapse) {
@@ -233,7 +295,15 @@ impl<B: Brush> TreeBuilder<'_, B> {
             .finish(&mut self.lcx.style_table, &mut self.lcx.style_runs);
 
         // Call generic layout builder method
-        build_into_layout(layout, self.scale, self.quantize, &text, self.lcx, self.fcx);
+        build_into_layout(
+            layout,
+            self.scale,
+            self.quantize,
+            &text,
+            self.lcx,
+            self.fcx,
+            self.initial_text_wrap_mode,
+        );
 
         text
     }
@@ -246,6 +316,17 @@ impl<B: Brush> TreeBuilder<'_, B> {
     }
 }
 
+fn push_inline_box_input<B: Brush>(
+    lcx: &mut LayoutContext<B>,
+    inline_box: InlineBox,
+    text_wrap_mode_after: Option<TextWrapMode>,
+) {
+    lcx.inline_boxes.push(InlineBoxInput {
+        inline_box,
+        text_wrap_mode_after,
+    });
+}
+
 fn build_into_layout<B: Brush>(
     layout: &mut Layout<B>,
     scale: f32,
@@ -253,6 +334,7 @@ fn build_into_layout<B: Brush>(
     text: &str,
     lcx: &mut LayoutContext<B>,
     fcx: &mut FontContext,
+    initial_text_wrap_mode: Option<TextWrapMode>,
 ) {
     if text.is_empty() && lcx.style_runs.is_empty() {
         lcx.style_table.push(ResolvedStyle::default());
@@ -287,10 +369,13 @@ fn build_into_layout<B: Brush>(
         .data
         .styles
         .extend(lcx.style_table.iter().map(|s| s.as_layout_style()));
+    layout.data.initial_text_wrap_mode = initial_text_wrap_mode.unwrap_or_else(|| {
+        layout.data.styles[lcx.style_runs[0].style_index as usize].text_wrap_mode
+    });
 
     // Sort the inline boxes as subsequent code assumes that they are in text index order.
     // Note: It's important that this is a stable sort to allow users to control the order of contiguous inline boxes
-    lcx.inline_boxes.sort_by_key(|b| b.index);
+    lcx.inline_boxes.sort_by_key(|input| input.inline_box.index);
 
     {
         let query = fcx.collection.query(&mut fcx.source_cache);
@@ -310,7 +395,18 @@ fn build_into_layout<B: Brush>(
 
     // Move inline boxes into the layout
     layout.data.inline_boxes.clear();
-    core::mem::swap(&mut layout.data.inline_boxes, &mut lcx.inline_boxes);
+    layout.data.inline_box_text_wrap_mode_after.clear();
+    for input in lcx.inline_boxes.drain(..) {
+        layout.data.inline_boxes.push(input.inline_box);
+        layout
+            .data
+            .inline_box_text_wrap_mode_after
+            .push(input.text_wrap_mode_after);
+    }
+    debug_assert_eq!(
+        layout.data.inline_boxes.len(),
+        layout.data.inline_box_text_wrap_mode_after.len()
+    );
 
     layout.data.finish();
 }

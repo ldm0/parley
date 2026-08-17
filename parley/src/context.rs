@@ -14,7 +14,7 @@ use super::style::{Brush, TextStyle};
 use crate::analysis::{AnalysisDataSources, CharInfo};
 use crate::bidi::BidiResolver;
 use crate::builder::TreeBuilder;
-use crate::inline_box::InlineBox;
+use crate::inline_box::InlineBoxInput;
 use crate::shape::ShapeContext;
 
 /// Shared scratch space used when constructing text layouts.
@@ -24,7 +24,7 @@ pub struct LayoutContext<B: Brush = [u8; 4]> {
     pub(crate) rcx: ResolveContext,
     pub(crate) style_table: Vec<ResolvedStyle<B>>,
     pub(crate) style_runs: Vec<StyleRun>,
-    pub(crate) inline_boxes: Vec<InlineBox>,
+    pub(crate) inline_boxes: Vec<InlineBoxInput>,
     pub(crate) bidi: BidiResolver,
 
     // Reusable style builders (to amortise allocations)
@@ -133,6 +133,7 @@ impl<B: Brush> LayoutContext<B> {
             lcx: self,
             fcx,
             cursor: 0,
+            initial_text_wrap_mode: None,
         }
     }
 
@@ -174,6 +175,7 @@ impl<B: Brush> LayoutContext<B> {
             quantize,
             lcx: self,
             fcx,
+            initial_text_wrap_mode: Some(root_style.text_wrap_mode),
         }
     }
 
