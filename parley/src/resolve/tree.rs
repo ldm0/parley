@@ -40,6 +40,10 @@ impl<B: Brush> TreeStyleBuilder<B> {
     fn current_style(&self) -> ResolvedStyle<B> {
         self.tree[self.current_span].style.clone()
     }
+
+    pub(crate) fn root_style(&self) -> &ResolvedStyle<B> {
+        &self.tree[0].style
+    }
 }
 
 impl<B: Brush> Default for TreeStyleBuilder<B> {

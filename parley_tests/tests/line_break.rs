@@ -143,6 +143,112 @@ fn break_by_length_multiple_inline_boxes() {
     env.check_layout_snapshot(&layout);
 }
 
+#[test]
+fn break_by_length_keeps_structural_edges_with_atomic_boxes() {
+    fn inline_ids<B: parley::Brush>(layout: &parley::Layout<B>) -> Vec<Vec<u64>> {
+        layout
+            .lines()
+            .map(|line| {
+                line.items()
+                    .filter_map(|item| match item {
+                        PositionedLayoutItem::InlineBox(item) => Some(item.id),
+                        PositionedLayoutItem::GlyphRun(_) => None,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    let mut env = TestEnv::new(test_name!(), None);
+    let mut builder = env.ranged_builder("");
+    builder.push_inline_box(InlineBox {
+        id: 0,
+        kind: InlineBoxKind::InlineStart,
+        index: 0,
+        width: 8.0,
+        height: 0.0,
+    });
+    builder.push_inline_box(InlineBox {
+        id: 1,
+        kind: InlineBoxKind::InFlow,
+        index: 0,
+        width: 64.0,
+        height: 20.0,
+    });
+    builder.push_inline_box(InlineBox {
+        id: 2,
+        kind: InlineBoxKind::InlineEnd,
+        index: 0,
+        width: 8.0,
+        height: 0.0,
+    });
+    builder.push_inline_box(InlineBox {
+        id: 3,
+        kind: InlineBoxKind::InFlow,
+        index: 0,
+        width: 64.0,
+        height: 20.0,
+    });
+    let mut layout = builder.build("");
+    let mut breaker = layout.break_lines();
+    breaker.break_next_with_length(1);
+    breaker.break_next_with_length(1);
+    breaker.finish();
+
+    assert_eq!(inline_ids(&layout), [vec![0, 1, 2], vec![3]]);
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.metrics().advance)
+            .collect::<Vec<_>>(),
+        [80.0, 64.0]
+    );
+
+    let mut builder = env.ranged_builder("");
+    builder.push_inline_box(InlineBox {
+        id: 0,
+        kind: InlineBoxKind::InFlow,
+        index: 0,
+        width: 64.0,
+        height: 20.0,
+    });
+    builder.push_inline_box(InlineBox {
+        id: 1,
+        kind: InlineBoxKind::InlineStart,
+        index: 0,
+        width: 8.0,
+        height: 0.0,
+    });
+    builder.push_inline_box(InlineBox {
+        id: 2,
+        kind: InlineBoxKind::InFlow,
+        index: 0,
+        width: 64.0,
+        height: 20.0,
+    });
+    builder.push_inline_box(InlineBox {
+        id: 3,
+        kind: InlineBoxKind::InlineEnd,
+        index: 0,
+        width: 8.0,
+        height: 0.0,
+    });
+    let mut layout = builder.build("");
+    let mut breaker = layout.break_lines();
+    breaker.break_next_with_length(1);
+    breaker.break_next_with_length(1);
+    breaker.finish();
+
+    assert_eq!(inline_ids(&layout), [vec![0], vec![1, 2, 3]]);
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.metrics().advance)
+            .collect::<Vec<_>>(),
+        [64.0, 80.0]
+    );
+}
+
 /// This test verifies that breaking in the middle of a ligature does NOT produce valid glyphs.
 ///
 /// When "abfi" is broken after 3 characters, the "fi" ligature is split with "f" on line 1

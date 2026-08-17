@@ -44,6 +44,10 @@ pub(crate) fn assert_eq_layout_data<B: Brush>(a: &LayoutData<B>, b: &LayoutData<
     assert_eq!(a.quantize, b.quantize, "{case} quantize mismatch");
     assert_eq!(a.base_level, b.base_level, "{case} base_level mismatch");
     assert_eq!(a.text_len, b.text_len, "{case} text_len mismatch");
+    assert_eq!(
+        a.root_style_index, b.root_style_index,
+        "{case} root_style_index mismatch"
+    );
     assert_eq!(a.width, b.width, "{case} width mismatch");
     assert_eq!(a.full_width, b.full_width, "{case} full_width mismatch");
     assert_eq!(a.height, b.height, "{case} height mismatch");
@@ -55,6 +59,10 @@ pub(crate) fn assert_eq_layout_data<B: Brush>(a: &LayoutData<B>, b: &LayoutData<
     assert_eq!(
         a.inline_boxes, b.inline_boxes,
         "{case} inline_boxes mismatch"
+    );
+    assert_eq!(
+        a.inline_box_style_after, b.inline_box_style_after,
+        "{case} inline box style transitions mismatch"
     );
 
     // Output of shaping

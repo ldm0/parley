@@ -3,7 +3,7 @@
 
 //! Test that the various builders produce the same results.
 
-use std::{borrow::Cow, path::PathBuf, sync::Arc};
+use std::{borrow::Cow, path::PathBuf, sync::Arc, vec::Vec};
 
 use fontique::{Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, SourceCache};
 use parlance::FontFamilyName;
@@ -11,10 +11,19 @@ use peniko::{Blob, color::palette};
 
 use super::utils::{ColorBrush, asserts::assert_eq_layout_data};
 use crate::{
-    FontContext, FontFamily, FontFeatures, FontVariations, Layout, LayoutContext, LineHeight,
-    OverflowWrap, RangedBuilder, StyleProperty, StyleRunBuilder, TextStyle, TextWrapMode,
-    TreeBuilder, WordBreak,
+    FontContext, FontFamily, FontFeatures, FontVariations, InlineBox, InlineBoxKind, Layout,
+    LayoutContext, LineHeight, OverflowWrap, RangedBuilder, StyleProperty, StyleRunBuilder,
+    TextStyle, TextWrapMode, TreeBuilder, WordBreak,
 };
+
+#[test]
+fn default_layout_supports_empty_measurement_and_line_breaking() {
+    let mut layout = Layout::<ColorBrush>::default();
+    let widths = layout.calculate_content_widths();
+    assert_eq!(widths.min, 0.0);
+    assert_eq!(widths.max, 0.0);
+    drop(layout.break_lines());
+}
 
 // TODO: `FONT_FAMILY_LIST`, `load_fonts`, and `create_font_context` are
 // duplicated between this crate and `parley_test`. We can't move the builder
@@ -436,6 +445,374 @@ fn style_runs_first_run_can_use_nonzero_style_index() {
         &runs.data,
         "style_runs_first_run_can_use_nonzero_style_index",
     );
+}
+
+#[test]
+fn ranged_root_wrap_mode_precedes_the_first_ranged_run() {
+    let text = "x";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
+    builder.push_default(FontFamily::from(FONT_FAMILY_LIST));
+    builder.push_default(StyleProperty::TextWrapMode(TextWrapMode::NoWrap));
+    builder.push(
+        StyleProperty::TextWrapMode(TextWrapMode::Wrap),
+        0..text.len(),
+    );
+    for id in 0..2 {
+        builder.push_inline_box(InlineBox {
+            id,
+            kind: InlineBoxKind::InFlow,
+            index: 0,
+            width: 64.0,
+            height: 20.0,
+        });
+    }
+
+    let mut layout = builder.build(text);
+    layout.break_all_lines(Some(64.0));
+    assert_eq!(layout.lines().count(), 1);
+}
+
+#[test]
+fn tree_inline_edges_are_zero_length_items() {
+    let text = "";
+    let root_style = TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        ..TextStyle::default()
+    };
+    let push_ranged_edges = |builder: &mut RangedBuilder<'_, ColorBrush>| {
+        for (id, kind) in [
+            (0, InlineBoxKind::InlineStart),
+            (1, InlineBoxKind::InlineEnd),
+        ] {
+            builder.push_inline_box(InlineBox {
+                id,
+                kind,
+                index: 0,
+                width: 8.0,
+                height: 0.0,
+            });
+        }
+    };
+    let push_tree_edges = |builder: &mut TreeBuilder<'_, ColorBrush>| {
+        for (id, kind) in [
+            (0, InlineBoxKind::InlineStart),
+            (1, InlineBoxKind::InlineEnd),
+        ] {
+            builder.push_inline_box(InlineBox {
+                id,
+                kind,
+                index: 0,
+                width: 8.0,
+                height: 0.0,
+            });
+        }
+    };
+
+    assert_builders_produce_same_result(
+        text,
+        1.0,
+        false,
+        None,
+        &root_style,
+        push_ranged_edges,
+        push_tree_edges,
+        true,
+    );
+}
+
+/// Inline boxes can be the only paragraph content. Their initial wrapping
+/// behavior must come from the first style run, not from the first entry in
+/// the caller-managed style table.
+#[test]
+fn nowrap_first_style_run_keeps_inline_boxes_on_one_line() {
+    let text = "";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let _unused_wrap_style = builder.push_style(TextStyle::default());
+    let nowrap_style = builder.push_style(TextStyle {
+        text_wrap_mode: TextWrapMode::NoWrap,
+        ..TextStyle::default()
+    });
+    builder.push_style_run(nowrap_style, ..);
+    for id in 0..4 {
+        builder.push_inline_box(InlineBox {
+            id,
+            kind: InlineBoxKind::InFlow,
+            index: 0,
+            width: 64.0,
+            height: 96.0,
+        });
+    }
+
+    let mut layout = builder.build(text);
+    let content_widths = layout.calculate_content_widths();
+    assert_eq!(content_widths.min, 256.0);
+    assert_eq!(content_widths.max, 256.0);
+
+    layout.break_all_lines(Some(192.0));
+    assert_eq!(layout.lines().count(), 1);
+    assert_eq!(layout.lines().next().unwrap().metrics().advance, 256.0);
+}
+
+/// Keep the complementary wrapping behavior covered while changing the
+/// inline-box boundary logic.
+#[test]
+fn wrap_first_style_run_breaks_between_inline_boxes() {
+    let text = "";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let wrap_style = builder.push_style(TextStyle::default());
+    builder.push_style_run(wrap_style, ..);
+    for id in 0..4 {
+        builder.push_inline_box(InlineBox {
+            id,
+            kind: InlineBoxKind::InFlow,
+            index: 0,
+            width: 64.0,
+            height: 96.0,
+        });
+    }
+
+    let mut layout = builder.build(text);
+    let content_widths = layout.calculate_content_widths();
+    assert_eq!(content_widths.min, 64.0);
+    assert_eq!(content_widths.max, 256.0);
+
+    layout.break_all_lines(Some(192.0));
+    assert_eq!(layout.lines().count(), 2);
+}
+
+fn push_test_inline_box(
+    builder: &mut StyleRunBuilder<'_, ColorBrush>,
+    id: u64,
+    kind: InlineBoxKind,
+    width: f32,
+    style_after: Option<u16>,
+) {
+    push_test_inline_box_at(builder, id, kind, 0, width, style_after);
+}
+
+fn push_test_inline_box_at(
+    builder: &mut StyleRunBuilder<'_, ColorBrush>,
+    id: u64,
+    kind: InlineBoxKind,
+    index: usize,
+    width: f32,
+    style_after: Option<u16>,
+) {
+    let inline_box = InlineBox {
+        id,
+        kind,
+        index,
+        width,
+        height: if kind == InlineBoxKind::InFlow {
+            20.0
+        } else {
+            0.0
+        },
+    };
+    if let Some(style_after) = style_after {
+        builder.push_inline_box_with_style_transition(inline_box, style_after);
+    } else {
+        builder.push_inline_box(inline_box);
+    }
+}
+
+fn line_advances(layout: &Layout<ColorBrush>) -> Vec<f32> {
+    layout.lines().map(|line| line.metrics().advance).collect()
+}
+
+/// A nested nowrap span is a state transition in the inline item stream, not
+/// a property of the atomic boxes it contains. Its boxes therefore form one
+/// min-content unit and overflow together before wrapping resumes outside.
+#[test]
+fn inline_edges_group_nested_nowrap_boxes() {
+    let text = "";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let wrap = builder.push_style(TextStyle::default());
+    let nowrap = builder.push_style(TextStyle {
+        text_wrap_mode: TextWrapMode::NoWrap,
+        ..TextStyle::default()
+    });
+    builder.push_style_run(wrap, ..);
+    builder.set_root_style(wrap);
+    push_test_inline_box(
+        &mut builder,
+        0,
+        InlineBoxKind::InlineStart,
+        8.0,
+        Some(nowrap),
+    );
+    for id in 1..=2 {
+        push_test_inline_box(&mut builder, id, InlineBoxKind::InFlow, 64.0, None);
+    }
+    push_test_inline_box(&mut builder, 3, InlineBoxKind::InlineEnd, 8.0, Some(wrap));
+    push_test_inline_box(&mut builder, 4, InlineBoxKind::InFlow, 64.0, None);
+
+    let mut layout = builder.build(text);
+    assert_eq!(layout.calculate_content_widths().min, 144.0);
+    assert_eq!(layout.calculate_content_widths().max, 208.0);
+
+    layout.break_all_lines(Some(100.0));
+    assert_eq!(line_advances(&layout), [144.0, 64.0]);
+}
+
+/// A break before an atomic inline moves before its inline-start decoration,
+/// and a break after it moves after its inline-end decoration. The decorated
+/// inline therefore remains one 80px min-content unit and one overflowing
+/// line when the available width is only 64px.
+#[test]
+fn inline_edges_move_atomic_breaks_outside_decorations() {
+    let text = "";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let wrap = builder.push_style(TextStyle::default());
+    builder.push_style_run(wrap, ..);
+    builder.set_root_style(wrap);
+    push_test_inline_box(&mut builder, 0, InlineBoxKind::InlineStart, 8.0, Some(wrap));
+    push_test_inline_box(&mut builder, 1, InlineBoxKind::InFlow, 64.0, None);
+    push_test_inline_box(&mut builder, 2, InlineBoxKind::InlineEnd, 8.0, Some(wrap));
+    push_test_inline_box(&mut builder, 3, InlineBoxKind::InFlow, 64.0, None);
+
+    let mut layout = builder.build(text);
+    assert_eq!(layout.calculate_content_widths().min, 80.0);
+    assert_eq!(layout.calculate_content_widths().max, 144.0);
+
+    layout.break_all_lines(Some(64.0));
+    assert_eq!(line_advances(&layout), [80.0, 64.0]);
+}
+
+/// A descendant can re-enable wrapping inside an otherwise nowrap paragraph.
+/// Leaving that descendant restores the paragraph mode for following boxes,
+/// without discarding the break opportunity created at the descendant's end.
+#[test]
+fn inline_edges_restore_parent_wrap_mode() {
+    let text = "";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let nowrap = builder.push_style(TextStyle {
+        text_wrap_mode: TextWrapMode::NoWrap,
+        ..TextStyle::default()
+    });
+    let wrap = builder.push_style(TextStyle::default());
+    builder.push_style_run(nowrap, ..);
+    builder.set_root_style(nowrap);
+    push_test_inline_box(&mut builder, 0, InlineBoxKind::InlineStart, 0.0, Some(wrap));
+    for id in 1..=2 {
+        push_test_inline_box(&mut builder, id, InlineBoxKind::InFlow, 64.0, None);
+    }
+    push_test_inline_box(&mut builder, 3, InlineBoxKind::InlineEnd, 0.0, Some(nowrap));
+    push_test_inline_box(&mut builder, 4, InlineBoxKind::InFlow, 64.0, None);
+
+    let mut layout = builder.build(text);
+    assert_eq!(layout.calculate_content_widths().min, 64.0);
+    assert_eq!(layout.calculate_content_widths().max, 192.0);
+
+    layout.break_all_lines(Some(64.0));
+    assert_eq!(line_advances(&layout), [64.0, 64.0, 64.0]);
+}
+
+/// Breakability on either side of an atomic inline survives zero-length style
+/// boundaries. Inline-end decoration stays with preceding text, while
+/// inline-start decoration moves with the following atomic box.
+#[test]
+fn inline_edges_transfer_text_atomic_breaks() {
+    let text = "x";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+    let text_style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        text_wrap_mode: TextWrapMode::Wrap,
+        ..TextStyle::default()
+    });
+    let root_style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        text_wrap_mode: TextWrapMode::NoWrap,
+        ..TextStyle::default()
+    });
+    builder.push_style_run(text_style, ..);
+    builder.set_root_style(root_style);
+    push_test_inline_box_at(
+        &mut builder,
+        0,
+        InlineBoxKind::InlineStart,
+        0,
+        8.0,
+        Some(text_style),
+    );
+    push_test_inline_box_at(
+        &mut builder,
+        1,
+        InlineBoxKind::InlineEnd,
+        1,
+        8.0,
+        Some(root_style),
+    );
+    push_test_inline_box_at(&mut builder, 2, InlineBoxKind::InFlow, 1, 64.0, None);
+    let mut layout = builder.build(text);
+    let content_widths = layout.calculate_content_widths();
+    assert_eq!(content_widths.min, 64.0);
+    assert!(content_widths.max > content_widths.min);
+    layout.break_all_lines(Some(64.0));
+    let advances = line_advances(&layout);
+    assert_eq!(advances.len(), 2);
+    assert!(advances[0] < 64.0);
+    assert_eq!(advances[1], 64.0);
+
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+    let text_style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        text_wrap_mode: TextWrapMode::Wrap,
+        ..TextStyle::default()
+    });
+    let nowrap_style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        text_wrap_mode: TextWrapMode::NoWrap,
+        ..TextStyle::default()
+    });
+    builder.push_style_run(text_style, ..);
+    builder.set_root_style(text_style);
+    push_test_inline_box_at(
+        &mut builder,
+        0,
+        InlineBoxKind::InlineStart,
+        1,
+        8.0,
+        Some(nowrap_style),
+    );
+    push_test_inline_box_at(&mut builder, 1, InlineBoxKind::InFlow, 1, 64.0, None);
+    push_test_inline_box_at(
+        &mut builder,
+        2,
+        InlineBoxKind::InlineEnd,
+        1,
+        8.0,
+        Some(text_style),
+    );
+    let mut layout = builder.build(text);
+    let content_widths = layout.calculate_content_widths();
+    assert_eq!(content_widths.min, 80.0);
+    assert!(content_widths.max > content_widths.min);
+    layout.break_all_lines(Some(64.0));
+    let advances = line_advances(&layout);
+    assert_eq!(advances.len(), 2);
+    assert!(advances[0] < 64.0);
+    assert_eq!(advances[1], 80.0);
 }
 
 /// Test that all the builders behave the same when given the same root style.
