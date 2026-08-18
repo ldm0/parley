@@ -26,6 +26,12 @@ fn canonicalize_layout_data<B: Brush>(layout_data: &LayoutData<B>) -> LayoutData
     }
 
     normalized.shaped_text.remap_styles(&remap);
+    normalized.root_style_index = remap[usize::from(normalized.root_style_index)];
+    for item in &mut normalized.items {
+        if let Some(style_index) = &mut item.style_after {
+            *style_index = remap[usize::from(*style_index)];
+        }
+    }
     normalized.styles = canonical_styles;
     normalized
 }

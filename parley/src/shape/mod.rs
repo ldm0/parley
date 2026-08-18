@@ -12,7 +12,7 @@ use smallvec::SmallVec;
 use super::layout::Layout;
 use super::resolve::{ResolveContext, ResolvedStyle};
 use super::style::{Brush, FontFeature, FontVariation};
-use crate::inline_box::InlineBox;
+use crate::inline_box::InlineBoxInput;
 use crate::util::{nearly_eq, nearly_zero};
 use crate::{FontContext, FontData};
 
@@ -46,7 +46,7 @@ pub(crate) fn shape_text<'a, B: Brush>(
     rcx: &'a ResolveContext,
     fcx: &'a mut FontContext,
     styles: &'a [ResolvedStyle<B>],
-    inline_boxes: &[InlineBox],
+    inline_boxes: &[InlineBoxInput],
     analysis: &Analysis,
     char_style_indices: &[u16],
     scx: &mut Shaper,
@@ -63,9 +63,11 @@ pub(crate) fn shape_text<'a, B: Brush>(
     // Do nothing if there is no text or styles (there should always be a default style)
     if text.is_empty() || styles.is_empty() {
         // Process any remaining inline boxes whose index is greater than the length of the text
-        for box_idx in 0..inline_boxes.len() {
+        for (box_idx, input) in inline_boxes.iter().enumerate() {
             // Push the box to the list of items
-            layout.data.push_inline_box(box_idx, BidiLevel::new(0));
+            layout
+                .data
+                .push_inline_box(box_idx, BidiLevel::new(0), input.style_after);
         }
         return;
     }
@@ -130,12 +132,12 @@ pub(crate) fn shape_text<'a, B: Brush>(
                 //
                 // We loop because there may be multiple boxes at this index.
                 let mut split = false;
-                while let Some(inline_box) = inline_box_iter.peek() {
-                    if inline_box.index < byte_index {
+                while let Some(input) = inline_box_iter.peek() {
+                    if input.inline_box.index < byte_index {
                         // Inline boxes *before* this index are popped (this occurs if the itemizer
                         // split a run and we were not called, such as at a bidi boundary).
                         inline_box_iter.next();
-                    } else if inline_box.index == byte_index {
+                    } else if input.inline_box.index == byte_index {
                         inline_box_iter.next();
                         split = true;
                     } else {
@@ -206,9 +208,11 @@ pub(crate) fn shape_text<'a, B: Brush>(
         } else {
             BidiLevel::new(0)
         };
-        while let Some((box_idx, inline_box)) = inline_box_iter.peek() {
-            if inline_box.index <= run_text_byte_start {
-                layout.data.push_inline_box(*box_idx, prev_bidi_level);
+        while let Some((box_idx, input)) = inline_box_iter.peek() {
+            if input.inline_box.index <= run_text_byte_start {
+                layout
+                    .data
+                    .push_inline_box(*box_idx, prev_bidi_level, input.style_after);
                 inline_box_iter.next();
             } else {
                 break;
@@ -239,8 +243,10 @@ pub(crate) fn shape_text<'a, B: Brush>(
         .last()
         .map(|r| r.bidi_level)
         .unwrap_or(BidiLevel::new(0));
-    for (box_idx, _inline_box) in inline_box_iter {
-        layout.data.push_inline_box(box_idx, bidi_level);
+    for (box_idx, input) in inline_box_iter {
+        layout
+            .data
+            .push_inline_box(box_idx, bidi_level, input.style_after);
     }
 }
 

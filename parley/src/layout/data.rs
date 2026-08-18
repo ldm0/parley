@@ -168,6 +168,12 @@ pub(crate) struct LayoutItem {
     pub(crate) index: usize,
     /// Bidi level for the item (used for reordering)
     pub(crate) bidi_level: BidiLevel,
+    /// Style that becomes current after this item is consumed.
+    ///
+    /// Text items derive their style from shaped characters. This transition
+    /// is used by inline start/end items, including zero-width boundaries that
+    /// cannot be represented by a text range.
+    pub(crate) style_after: Option<u16>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -181,6 +187,8 @@ pub(crate) struct LayoutData<B: Brush> {
     pub(crate) base_level: BidiLevel,
     /// The length of the text in the layout
     pub(crate) text_len: usize,
+    /// Style of the inline formatting-context root.
+    pub(crate) root_style_index: u16,
 
     // Output of style resolution (input to line breaking)
     pub(crate) styles: Vec<Style<B>>,
@@ -225,6 +233,7 @@ impl<B: Brush> Default for LayoutData<B> {
             quantize: true,
             base_level: BidiLevel::new(0),
             text_len: 0,
+            root_style_index: 0,
             width: 0.,
             full_width: 0.,
             height: 0.,
@@ -251,6 +260,7 @@ impl<B: Brush> LayoutData<B> {
         self.quantize = true;
         self.base_level = BidiLevel::new(0);
         self.text_len = 0;
+        self.root_style_index = 0;
         self.width = 0.;
         self.full_width = 0.;
         self.height = 0.;
@@ -264,11 +274,17 @@ impl<B: Brush> LayoutData<B> {
     }
 
     /// Push an inline box to the list of items
-    pub(crate) fn push_inline_box(&mut self, index: usize, bidi_level: BidiLevel) {
+    pub(crate) fn push_inline_box(
+        &mut self,
+        index: usize,
+        bidi_level: BidiLevel,
+        style_after: Option<u16>,
+    ) {
         self.items.push(LayoutItem {
             kind: LayoutItemKind::InlineBox,
             index,
             bidi_level,
+            style_after,
         });
     }
     #[allow(clippy::too_many_arguments)]
@@ -320,6 +336,7 @@ impl<B: Brush> LayoutData<B> {
             kind: LayoutItemKind::TextRun,
             index: self.runs.len() - 1,
             bidi_level: shaped_run.bidi_level,
+            style_after: None,
         });
     }
 
@@ -370,7 +387,13 @@ impl<B: Brush> LayoutData<B> {
 
         let mut running_min_width = 0.0;
         let mut running_max_width = 0.0;
-        let mut text_wrap_mode = TextWrapMode::Wrap;
+        // Open/close inline items belong to the adjacent unbreakable content:
+        // start decorations move with following content and end decorations
+        // remain attached to preceding content.
+        let mut pending_inline_start_width = 0.0;
+        let mut break_after_pending = false;
+        let mut text_wrap_mode = self.styles[usize::from(self.root_style_index)].text_wrap_mode;
+        let mut last_content_text_wrap_mode = None;
         // The whitespace class of the previous atom's first character, and the atom's advance.
         let mut prev_atom: Option<(Whitespace, f32)> = None;
         let is_rtl = self.base_level.is_rtl();
@@ -385,6 +408,13 @@ impl<B: Brush> LayoutData<B> {
                         });
                     }
                     for atom in slice.atoms_start() {
+                        if break_after_pending {
+                            let trailing_whitespace = whitespace_advance(prev_atom);
+                            min_width = min_width.max(running_min_width - trailing_whitespace);
+                            running_min_width = 0.0;
+                            break_after_pending = false;
+                            prev_atom = None;
+                        }
                         let character = &atom.characters()[0];
                         let boundary = character.info.boundary();
                         let style = &self.styles[character.style_index as usize];
@@ -396,8 +426,12 @@ impl<B: Brush> LayoutData<B> {
                                     || style.overflow_wrap == OverflowWrap::Anywhere))
                         {
                             let trailing_whitespace = whitespace_advance(prev_atom);
-                            min_width = min_width.max(running_min_width - trailing_whitespace);
-                            running_min_width = 0.0;
+                            min_width = min_width.max(
+                                running_min_width
+                                    - pending_inline_start_width
+                                    - trailing_whitespace,
+                            );
+                            running_min_width = pending_inline_start_width;
                             if boundary == Boundary::Mandatory {
                                 max_width = max_width.max(running_max_width - trailing_whitespace);
                                 running_max_width = 0.0;
@@ -405,6 +439,8 @@ impl<B: Brush> LayoutData<B> {
                         }
                         running_min_width += atom.advance();
                         running_max_width += atom.advance();
+                        pending_inline_start_width = 0.0;
+                        last_content_text_wrap_mode = Some(style.text_wrap_mode);
                         if !is_rtl {
                             prev_atom = Some((character.info.whitespace(), atom.advance()));
                         }
@@ -414,18 +450,54 @@ impl<B: Brush> LayoutData<B> {
                 }
                 LayoutItemKind::InlineBox => {
                     let ibox = &self.inline_boxes[item.index];
-                    if ibox.kind == InlineBoxKind::InFlow {
-                        running_max_width += ibox.width;
-                        if text_wrap_mode == TextWrapMode::Wrap {
-                            let trailing_whitespace = whitespace_advance(prev_atom);
-                            min_width = min_width.max(running_min_width - trailing_whitespace);
-                            min_width = min_width.max(ibox.width);
-                            running_min_width = 0.0;
-                        } else {
+                    match ibox.kind {
+                        InlineBoxKind::InFlow => {
+                            if break_after_pending {
+                                let trailing_whitespace = whitespace_advance(prev_atom);
+                                min_width = min_width.max(running_min_width - trailing_whitespace);
+                                running_min_width = 0.0;
+                            }
+                            running_max_width += ibox.width;
+                            let can_break_before = text_wrap_mode == TextWrapMode::Wrap
+                                || last_content_text_wrap_mode == Some(TextWrapMode::Wrap);
+                            if can_break_before {
+                                let trailing_whitespace = whitespace_advance(prev_atom);
+                                min_width = min_width.max(
+                                    running_min_width
+                                        - pending_inline_start_width
+                                        - trailing_whitespace,
+                                );
+                                running_min_width = pending_inline_start_width;
+                            }
                             running_min_width += ibox.width;
+                            pending_inline_start_width = 0.0;
+                            break_after_pending = text_wrap_mode == TextWrapMode::Wrap;
+                            last_content_text_wrap_mode = Some(text_wrap_mode);
                         }
+                        InlineBoxKind::InlineStart => {
+                            if break_after_pending {
+                                let trailing_whitespace = whitespace_advance(prev_atom);
+                                min_width = min_width.max(running_min_width - trailing_whitespace);
+                                running_min_width = 0.0;
+                                break_after_pending = false;
+                            }
+                            running_min_width += ibox.width;
+                            running_max_width += ibox.width;
+                            pending_inline_start_width += ibox.width;
+                        }
+                        InlineBoxKind::InlineEnd => {
+                            running_min_width += ibox.width;
+                            running_max_width += ibox.width;
+                            pending_inline_start_width = 0.0;
+                        }
+                        InlineBoxKind::OutOfFlow | InlineBoxKind::CustomOutOfFlow => {}
                     }
-                    prev_atom = None;
+                    if let Some(style_index) = item.style_after {
+                        text_wrap_mode = self.styles[usize::from(style_index)].text_wrap_mode;
+                    }
+                    if ibox.kind.contributes_advance() {
+                        prev_atom = None;
+                    }
                 }
             }
             let trailing_whitespace = whitespace_advance(prev_atom);

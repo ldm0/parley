@@ -9,7 +9,9 @@
 use crate::test_name;
 use crate::util::TestEnv;
 use parley::style::FontFamily;
-use parley::{Alignment, AlignmentOptions, InlineBox, InlineBoxKind, StyleProperty};
+use parley::{
+    Alignment, AlignmentOptions, InlineBox, InlineBoxKind, PositionedLayoutItem, StyleProperty,
+};
 
 #[test]
 fn break_by_length_basic() {
@@ -146,6 +148,54 @@ fn break_by_length_multiple_inline_boxes() {
 
     assert_eq!(layout.len(), 3, "Expected 3 lines");
     env.check_layout_snapshot(&layout);
+}
+
+#[test]
+fn break_by_length_keeps_inline_edges_with_atomic_content() {
+    let mut env = TestEnv::new(test_name!(), None);
+    let text = "";
+    let mut builder = env.ranged_builder(text);
+    for (id, kind, width) in [
+        (0, InlineBoxKind::InlineStart, 8.0),
+        (1, InlineBoxKind::InFlow, 64.0),
+        (2, InlineBoxKind::InlineEnd, 8.0),
+        (3, InlineBoxKind::InFlow, 64.0),
+    ] {
+        builder.push_inline_box(InlineBox {
+            id,
+            kind,
+            index: 0,
+            width,
+            height: 0.0,
+            baseline: None,
+        });
+    }
+    let mut layout = builder.build(text);
+
+    let mut breaker = layout.break_lines();
+    breaker.break_next_with_length(1);
+    breaker.break_next_with_length(10);
+    breaker.finish();
+
+    let line_box_ids = layout
+        .lines()
+        .map(|line| {
+            line.items()
+                .filter_map(|item| match item {
+                    PositionedLayoutItem::InlineBox(inline_box) => Some(inline_box.id),
+                    PositionedLayoutItem::GlyphRun(_) => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(line_box_ids, [vec![0, 1, 2], vec![3]]);
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.metrics().advance)
+            .collect::<Vec<_>>(),
+        [80.0, 64.0]
+    );
 }
 
 /// This test verifies that a ligature is never split across lines.

@@ -17,7 +17,7 @@ use super::resolve::{RangedStyleBuilder, ResolveContext, ResolvedStyle, StyleRun
 use super::style::{Brush, TextStyle};
 
 use crate::builder::TreeBuilder;
-use crate::inline_box::InlineBox;
+use crate::inline_box::InlineBoxInput;
 
 /// Shared scratch space used when constructing text layouts.
 ///
@@ -26,7 +26,7 @@ pub struct LayoutContext<B: Brush = [u8; 4]> {
     pub(crate) rcx: ResolveContext,
     pub(crate) style_table: Vec<ResolvedStyle<B>>,
     pub(crate) style_runs: Vec<StyleRun>,
-    pub(crate) inline_boxes: Vec<InlineBox>,
+    pub(crate) inline_boxes: Vec<InlineBoxInput>,
 
     // Reusable text analysis
     pub(crate) analyzer: Analyzer,
@@ -139,6 +139,7 @@ impl<B: Brush> LayoutContext<B> {
             lcx: self,
             fcx,
             cursor: 0,
+            root_style_index: None,
         }
     }
 

@@ -318,7 +318,7 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
 
                     self.item_index += 1;
                     self.glyph_start = 0;
-                    if inline_box.kind == InlineBoxKind::InFlow {
+                    if inline_box.kind.contributes_advance() {
                         self.offset += inline_box.width;
                     }
                     return Some(PositionedLayoutItem::InlineBox(PositionedInlineBox {

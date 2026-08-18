@@ -70,6 +70,10 @@ impl<B: Brush> RangedStyleBuilder<B> {
         self.properties.push(RangedProperty { property, range });
     }
 
+    pub(crate) fn root_style(&self) -> &ResolvedStyle<B> {
+        &self.root_style
+    }
+
     /// Computes style table + style runs for the ranged properties.
     pub(crate) fn finish(
         &mut self,

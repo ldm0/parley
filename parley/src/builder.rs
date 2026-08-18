@@ -9,13 +9,13 @@ use super::style::{Brush, StyleProperty, TextStyle, WhiteSpaceCollapse};
 
 use super::layout::Layout;
 
-use alloc::string::String;
+use alloc::{string::String, vec::Vec};
 use core::ops::{Bound, Range, RangeBounds};
 use parlance::BaseDirection;
 use parley_engine::break_overrides::LineBreakOverrideFn;
 
 use crate::InlineBoxKind;
-use crate::inline_box::InlineBox;
+use crate::inline_box::{InlineBox, InlineBoxInput};
 use crate::resolve::{ResolvedStyle, StyleRun, tree::ItemKind};
 
 #[derive(Clone, Copy)]
@@ -67,7 +67,7 @@ impl<'b, B: Brush> RangedBuilder<'b, B> {
     }
 
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.lcx.inline_boxes.push(inline_box);
+        push_inline_box_input(self.lcx, inline_box, None);
     }
 
     /// Sets the paragraph's base direction.
@@ -85,13 +85,26 @@ impl<'b, B: Brush> RangedBuilder<'b, B> {
     }
 
     pub fn build_into(self, layout: &mut Layout<B>, text: impl AsRef<str>) {
+        let root_style = self.lcx.ranged_style_builder.root_style().clone();
         // Apply RangedStyleBuilder styles directly to style-table/style-run state.
         self.lcx
             .ranged_style_builder
             .finish(&mut self.lcx.style_table, &mut self.lcx.style_runs);
+        let root_style_index = establish_root_style(
+            &mut self.lcx.style_table,
+            &mut self.lcx.style_runs,
+            root_style,
+        );
 
         // Call generic layout builder method
-        build_into_layout(layout, text.as_ref(), self.lcx, self.fcx, self.options);
+        build_into_layout(
+            layout,
+            text.as_ref(),
+            self.lcx,
+            self.fcx,
+            self.options,
+            Some(root_style_index),
+        );
     }
 
     pub fn build(self, text: impl AsRef<str>) -> Layout<B> {
@@ -110,6 +123,7 @@ pub struct StyleRunBuilder<'a, B: Brush> {
     pub(crate) lcx: &'a mut LayoutContext<B>,
     pub(crate) fcx: &'a mut FontContext,
     pub(crate) cursor: usize,
+    pub(crate) root_style_index: Option<u16>,
 }
 
 impl<'b, B: Brush> StyleRunBuilder<'b, B> {
@@ -165,7 +179,37 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
     }
 
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.lcx.inline_boxes.push(inline_box);
+        push_inline_box_input(self.lcx, inline_box, None);
+    }
+
+    /// Sets the style of the inline formatting-context root.
+    ///
+    /// This style establishes state before the first text item. It can differ
+    /// from the first text run when a paragraph begins with a nested inline or
+    /// contains only inline boxes.
+    pub fn set_root_style(&mut self, style_index: u16) {
+        assert!(
+            usize::from(style_index) < self.lcx.style_table.len(),
+            "StyleRunBuilder expects a root style previously added via push_style"
+        );
+        self.root_style_index = Some(style_index);
+    }
+
+    /// Adds an inline box whose completion changes the current inline style.
+    ///
+    /// This models open/close inline items without reducing their state to a
+    /// one-off property. The transition is normally used with
+    /// [`InlineBoxKind::InlineStart`] and [`InlineBoxKind::InlineEnd`].
+    pub fn push_inline_box_with_style_transition(
+        &mut self,
+        inline_box: InlineBox,
+        style_after: u16,
+    ) {
+        assert!(
+            usize::from(style_after) < self.lcx.style_table.len(),
+            "StyleRunBuilder expects transition styles previously added via push_style"
+        );
+        push_inline_box_input(self.lcx, inline_box, Some(style_after));
     }
 
     /// Sets the paragraph's base direction.
@@ -203,7 +247,14 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
                 range: 0..0,
             });
         }
-        build_into_layout(layout, text.as_ref(), self.lcx, self.fcx, self.options);
+        build_into_layout(
+            layout,
+            text.as_ref(),
+            self.lcx,
+            self.fcx,
+            self.options,
+            self.root_style_index,
+        );
     }
 
     pub fn build(self, text: impl AsRef<str>) -> Layout<B> {
@@ -265,7 +316,7 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
 
         // TODO: arrange type better here to factor out the index
         inline_box.index = self.lcx.tree_style_builder.current_text_len();
-        self.lcx.inline_boxes.push(inline_box);
+        push_inline_box_input(self.lcx, inline_box, None);
     }
 
     pub fn set_white_space_mode(&mut self, white_space_collapse: WhiteSpaceCollapse) {
@@ -290,14 +341,27 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
 
     #[inline]
     pub fn build_into(self, layout: &mut Layout<B>) -> String {
+        let root_style = self.lcx.tree_style_builder.root_style().clone();
         // Apply TreeStyleBuilder styles to LayoutContext.
         let text = self
             .lcx
             .tree_style_builder
             .finish(&mut self.lcx.style_table, &mut self.lcx.style_runs);
+        let root_style_index = establish_root_style(
+            &mut self.lcx.style_table,
+            &mut self.lcx.style_runs,
+            root_style,
+        );
 
         // Call generic layout builder method
-        build_into_layout(layout, &text, self.lcx, self.fcx, self.options);
+        build_into_layout(
+            layout,
+            &text,
+            self.lcx,
+            self.fcx,
+            self.options,
+            Some(root_style_index),
+        );
 
         text
     }
@@ -310,12 +374,56 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
     }
 }
 
+fn push_inline_box_input<B: Brush>(
+    lcx: &mut LayoutContext<B>,
+    inline_box: InlineBox,
+    style_after: Option<u16>,
+) {
+    lcx.inline_boxes.push(InlineBoxInput {
+        inline_box,
+        style_after,
+    });
+}
+
+fn establish_root_style<B: Brush>(
+    style_table: &mut Vec<ResolvedStyle<B>>,
+    style_runs: &mut [StyleRun],
+    root_style: ResolvedStyle<B>,
+) -> u16 {
+    match style_table.iter().position(|style| *style == root_style) {
+        Some(0) => {}
+        Some(root_index) => {
+            style_table.swap(0, root_index);
+            let root_index = root_index as u16;
+            for run in style_runs {
+                run.style_index = match run.style_index {
+                    0 => root_index,
+                    index if index == root_index => 0,
+                    index => index,
+                };
+            }
+        }
+        None => {
+            assert!(style_table.len() < usize::from(u16::MAX), "too many styles");
+            style_table.insert(0, root_style);
+            for run in style_runs {
+                run.style_index = run
+                    .style_index
+                    .checked_add(1)
+                    .expect("style count checked above");
+            }
+        }
+    }
+    0
+}
+
 fn build_into_layout<B: Brush>(
     layout: &mut Layout<B>,
     text: &str,
     lcx: &mut LayoutContext<B>,
     fcx: &mut FontContext,
     options: BuilderOptions<'_>,
+    root_style_index: Option<u16>,
 ) {
     if text.is_empty() && lcx.style_runs.is_empty() {
         lcx.style_table.push(ResolvedStyle::default());
@@ -341,6 +449,8 @@ fn build_into_layout<B: Brush>(
     layout.data.quantize = options.quantize;
     layout.data.base_level = lcx.analysis.paragraph_level();
     layout.data.text_len = text.len();
+    layout.data.root_style_index = root_style_index
+        .unwrap_or_else(|| lcx.style_runs.first().expect("checked above").style_index);
 
     lcx.char_style_indices
         .resize(lcx.analysis.char_info().len(), 0);
@@ -360,7 +470,7 @@ fn build_into_layout<B: Brush>(
 
     // Sort the inline boxes as subsequent code assumes that they are in text index order.
     // Note: It's important that this is a stable sort to allow users to control the order of contiguous inline boxes
-    lcx.inline_boxes.sort_by_key(|b| b.index);
+    lcx.inline_boxes.sort_by_key(|input| input.inline_box.index);
 
     {
         super::shape::shape_text(
@@ -379,7 +489,10 @@ fn build_into_layout<B: Brush>(
 
     // Move inline boxes into the layout
     layout.data.inline_boxes.clear();
-    core::mem::swap(&mut layout.data.inline_boxes, &mut lcx.inline_boxes);
+    layout
+        .data
+        .inline_boxes
+        .extend(lcx.inline_boxes.drain(..).map(|input| input.inline_box));
 
     layout.data.finish();
 }

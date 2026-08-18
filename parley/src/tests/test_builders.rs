@@ -11,9 +11,9 @@ use peniko::{Blob, color::palette};
 
 use super::utils::{ColorBrush, asserts::assert_eq_layout_data};
 use crate::{
-    BaseDirection, FontContext, FontFamily, FontFeatures, FontVariations, Layout, LayoutContext,
-    LineHeight, OverflowWrap, RangedBuilder, StyleProperty, StyleRunBuilder, TextStyle,
-    TextWrapMode, TreeBuilder, WordBreak,
+    BaseDirection, FontContext, FontFamily, FontFeatures, FontVariations, InlineBox, InlineBoxKind,
+    Layout, LayoutContext, LineHeight, OverflowWrap, RangedBuilder, StyleProperty, StyleRunBuilder,
+    TextStyle, TextWrapMode, TreeBuilder, WordBreak,
 };
 
 // TODO: `FONT_FAMILY_LIST`, `load_fonts`, and `create_font_context` are
@@ -451,8 +451,9 @@ fn style_runs_first_run_can_use_nonzero_style_index() {
             ..modified_style.clone()
         };
 
-        let _root_index = rb.push_style(root_run);
+        let root_index = rb.push_style(root_run);
         let modified_index = rb.push_style(modified_run);
+        rb.set_root_style(root_index);
         rb.push_style_run(modified_index, 0..text.len());
     });
 
@@ -684,4 +685,127 @@ fn builders_crlf_across_run_boundary_counts_as_single_line_break() {
         split_crlf, split_lf,
         "styled CRLF should match styled LF line count"
     );
+}
+
+fn push_test_inline_box(
+    builder: &mut StyleRunBuilder<'_, ColorBrush>,
+    id: u64,
+    kind: InlineBoxKind,
+    width: f32,
+    style_after: Option<u16>,
+) {
+    let inline_box = InlineBox {
+        id,
+        kind,
+        index: 0,
+        width,
+        height: if kind == InlineBoxKind::InFlow {
+            20.0
+        } else {
+            0.0
+        },
+        baseline: None,
+    };
+    if let Some(style_after) = style_after {
+        builder.push_inline_box_with_style_transition(inline_box, style_after);
+    } else {
+        builder.push_inline_box(inline_box);
+    }
+}
+
+fn line_advances(layout: &Layout<ColorBrush>) -> Vec<f32> {
+    layout.lines().map(|line| line.metrics().advance).collect()
+}
+
+/// A nested nowrap span is a style transition in the item stream. Its atomic
+/// children form one min-content unit, then wrapping resumes outside it.
+#[test]
+fn inline_style_boundaries_group_nested_nowrap_boxes() {
+    let text = "";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let wrap = builder.push_style(TextStyle::default());
+    let nowrap = builder.push_style(TextStyle {
+        text_wrap_mode: TextWrapMode::NoWrap,
+        ..TextStyle::default()
+    });
+    builder.set_root_style(wrap);
+    builder.push_style_run(wrap, ..);
+    push_test_inline_box(
+        &mut builder,
+        0,
+        InlineBoxKind::InlineStart,
+        8.0,
+        Some(nowrap),
+    );
+    for id in 1..=2 {
+        push_test_inline_box(&mut builder, id, InlineBoxKind::InFlow, 64.0, None);
+    }
+    push_test_inline_box(&mut builder, 3, InlineBoxKind::InlineEnd, 8.0, Some(wrap));
+    push_test_inline_box(&mut builder, 4, InlineBoxKind::InFlow, 64.0, None);
+
+    let mut layout = builder.build(text);
+    assert_eq!(layout.calculate_content_widths().min, 144.0);
+    assert_eq!(layout.calculate_content_widths().max, 208.0);
+
+    layout.break_all_lines(Some(100.0));
+    assert_eq!(line_advances(&layout), [144.0, 64.0]);
+}
+
+/// A break next to an atomic inline is moved outside its start/end
+/// decorations, keeping the decorated fragment indivisible.
+#[test]
+fn inline_style_boundaries_keep_atomic_decorations_together() {
+    let text = "";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let wrap = builder.push_style(TextStyle::default());
+    builder.set_root_style(wrap);
+    builder.push_style_run(wrap, ..);
+    push_test_inline_box(&mut builder, 0, InlineBoxKind::InlineStart, 8.0, Some(wrap));
+    push_test_inline_box(&mut builder, 1, InlineBoxKind::InFlow, 64.0, None);
+    push_test_inline_box(&mut builder, 2, InlineBoxKind::InlineEnd, 8.0, Some(wrap));
+    push_test_inline_box(&mut builder, 3, InlineBoxKind::InFlow, 64.0, None);
+
+    let mut layout = builder.build(text);
+    assert_eq!(layout.calculate_content_widths().min, 80.0);
+    assert_eq!(layout.calculate_content_widths().max, 144.0);
+
+    layout.break_all_lines(Some(64.0));
+    assert_eq!(line_advances(&layout), [80.0, 64.0]);
+}
+
+/// A descendant can re-enable wrapping inside a nowrap root, while its close
+/// item restores the root style for following atomic content.
+#[test]
+fn inline_style_boundaries_restore_parent_style() {
+    let text = "";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let nowrap = builder.push_style(TextStyle {
+        text_wrap_mode: TextWrapMode::NoWrap,
+        ..TextStyle::default()
+    });
+    let wrap = builder.push_style(TextStyle::default());
+    builder.set_root_style(nowrap);
+    builder.push_style_run(nowrap, ..);
+    push_test_inline_box(&mut builder, 0, InlineBoxKind::InlineStart, 0.0, Some(wrap));
+    for id in 1..=2 {
+        push_test_inline_box(&mut builder, id, InlineBoxKind::InFlow, 64.0, None);
+    }
+    push_test_inline_box(&mut builder, 3, InlineBoxKind::InlineEnd, 0.0, Some(nowrap));
+    push_test_inline_box(&mut builder, 4, InlineBoxKind::InFlow, 64.0, None);
+
+    let mut layout = builder.build(text);
+    assert_eq!(layout.calculate_content_widths().min, 64.0);
+    assert_eq!(layout.calculate_content_widths().max, 192.0);
+
+    layout.break_all_lines(Some(64.0));
+    assert_eq!(line_advances(&layout), [64.0, 64.0, 64.0]);
 }

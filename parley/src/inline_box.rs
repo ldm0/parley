@@ -30,6 +30,18 @@ pub enum InlineBoxKind {
     ///
     /// They correspond to `display: inline-block` boxes in CSS.
     InFlow,
+    /// The inline-start edge of a non-atomic inline box.
+    ///
+    /// The edge contributes its width to inline flow, but does not create an
+    /// independent soft-wrap opportunity. If the following content moves to
+    /// the next line, this edge moves with it.
+    InlineStart,
+    /// The inline-end edge of a non-atomic inline box.
+    ///
+    /// The edge contributes its width to inline flow, but does not create an
+    /// independent soft-wrap opportunity. A break after the preceding content
+    /// is moved past this edge.
+    InlineEnd,
     /// `OutOfFlow` boxes are assigned a position as if they were a zero-sized inline box, but
     /// do not take up space in the layout.
     ///
@@ -41,4 +53,27 @@ pub enum InlineBoxKind {
     ///
     /// They can be used to implement advanced layout modes such as CSS's `float`
     CustomOutOfFlow,
+}
+
+impl InlineBoxKind {
+    pub(crate) const fn contributes_advance(self) -> bool {
+        matches!(self, Self::InFlow | Self::InlineStart | Self::InlineEnd)
+    }
+
+    pub(crate) const fn is_inline_edge(self) -> bool {
+        matches!(self, Self::InlineStart | Self::InlineEnd)
+    }
+}
+
+/// Builder input retained until inline boxes have been inserted into the
+/// shaped item stream.
+#[derive(Debug, Clone)]
+pub(crate) struct InlineBoxInput {
+    pub(crate) inline_box: InlineBox,
+    /// Style that becomes current after this item is consumed.
+    ///
+    /// This references the builder's style table rather than duplicating a
+    /// single property such as `text-wrap-mode`. It is normally present only
+    /// on [`InlineBoxKind::InlineStart`] and [`InlineBoxKind::InlineEnd`].
+    pub(crate) style_after: Option<u16>,
 }
