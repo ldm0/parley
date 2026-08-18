@@ -139,6 +139,11 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
 
     /// Adds a fully-specified style to the shared style table and
     /// returns its index.
+    ///
+    /// [`StyleRunBuilder`] accepts caller-owned text verbatim. Callers using a
+    /// CSS [`WhiteSpaceCollapse`] value must perform phase-I text
+    /// normalization before building; Parley applies the style's phase-II
+    /// line breaking, hanging-space, and intrinsic-size behavior.
     pub fn push_style<'family, 'settings>(
         &mut self,
         style: TextStyle<'family, 'settings, B>,
@@ -308,7 +313,6 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
     pub fn push_inline_box(&mut self, mut inline_box: InlineBox) {
         if inline_box.kind == InlineBoxKind::InFlow {
             self.lcx.tree_style_builder.push_uncommitted_text(false);
-            self.lcx.tree_style_builder.set_is_span_first(false);
             self.lcx
                 .tree_style_builder
                 .set_last_item_kind(ItemKind::InlineBox);
@@ -319,7 +323,14 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
         push_inline_box_input(self.lcx, inline_box, None);
     }
 
+    /// Changes `white-space-collapse` on the active style.
+    ///
+    /// Text already pushed under that style is committed first. New code can
+    /// also set [`TextStyle::white_space_collapse`] on the root or use
+    /// [`StyleProperty::WhiteSpaceCollapse`] in a modification span.
     pub fn set_white_space_mode(&mut self, white_space_collapse: WhiteSpaceCollapse) {
+        // Compatibility shorthand. The mode is stored in the active style,
+        // alongside the other line-breaking properties.
         self.lcx
             .tree_style_builder
             .set_white_space_mode(white_space_collapse);

@@ -28,6 +28,12 @@ This release has an [MSRV] of 1.88.
 
 #### Parley
 
+- CSS `white-space-collapse` is now a regular text style, including
+  `preserve-breaks`, `preserve-spaces`, and `break-spaces`. Tree-built text is
+  normalized from the active style; style-run layouts apply per-run wrapping,
+  hanging-space, and intrinsic-size behavior.
+- Inline start/end items can carry a full style transition, allowing nested
+  inline styles to affect line breaking even at zero-length boundaries.
 - Breaking change: the `Glyph::style_index` field was removed. Use `Cluster::{style, style_index}` or `GlyphRun::{style, style_index}` instead. ([#661][] by [@tomcur][])
 - Breaking change: `Cluster` now spans a full grapheme cluster instead of a single character. ([#715][] by [@tomcur][])  
   Shaped clusters that cross grapheme boundaries are represented using the existing `Cluster::is_ligature_start` and `Cluster::is_ligature_continuation`; note these methods previously encoded graphemes as well.

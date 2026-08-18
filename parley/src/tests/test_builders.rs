@@ -3,7 +3,7 @@
 
 //! Test that the various builders produce the same results.
 
-use std::{borrow::Cow, path::PathBuf, sync::Arc, vec::Vec};
+use std::{borrow::Cow, path::PathBuf, sync::Arc, vec, vec::Vec};
 
 use fontique::{Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, SourceCache};
 use parlance::FontFamilyName;
@@ -12,8 +12,9 @@ use peniko::{Blob, color::palette};
 use super::utils::{ColorBrush, asserts::assert_eq_layout_data};
 use crate::{
     BaseDirection, FontContext, FontFamily, FontFeatures, FontVariations, InlineBox, InlineBoxKind,
-    Layout, LayoutContext, LineHeight, OverflowWrap, RangedBuilder, StyleProperty, StyleRunBuilder,
-    TextStyle, TextWrapMode, TreeBuilder, WordBreak,
+    Layout, LayoutContext, LineHeight, OverflowWrap, PositionedLayoutItem, RangedBuilder,
+    StyleProperty, StyleRunBuilder, TextStyle, TextWrapMode, TreeBuilder, WhiteSpaceCollapse,
+    WordBreak,
 };
 
 // TODO: `FONT_FAMILY_LIST`, `load_fonts`, and `create_font_context` are
@@ -281,6 +282,7 @@ fn create_root_style() -> TextStyle<'static, 'static, ColorBrush> {
         word_break: WordBreak::BreakAll,
         overflow_wrap: OverflowWrap::Anywhere,
         text_wrap_mode: TextWrapMode::Wrap,
+        white_space_collapse: WhiteSpaceCollapse::Preserve,
     }
 }
 
@@ -407,6 +409,327 @@ fn builders_style_runs_match_ranged() {
     });
 
     assert_eq_layout_data(&ranged.data, &runs.data, "style_runs_match_ranged");
+}
+
+fn build_white_space_layout(
+    fcx: &mut FontContext,
+    text: &str,
+    white_space_collapse: WhiteSpaceCollapse,
+    text_wrap_mode: TextWrapMode,
+) -> Layout<ColorBrush> {
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(fcx, text, 1.0, false);
+    let style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        white_space_collapse,
+        text_wrap_mode,
+        ..TextStyle::default()
+    });
+    builder.set_root_style(style);
+    builder.push_style_run(style, ..);
+    builder.build(text)
+}
+
+#[test]
+fn style_runs_apply_white_space_collapse_to_intrinsic_sizes() {
+    let mut fcx = create_font_context();
+    let collapse = build_white_space_layout(
+        &mut fcx,
+        "x ",
+        WhiteSpaceCollapse::Collapse,
+        TextWrapMode::Wrap,
+    )
+    .calculate_content_widths();
+    let preserve = build_white_space_layout(
+        &mut fcx,
+        "x ",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+    )
+    .calculate_content_widths();
+    let break_spaces = build_white_space_layout(
+        &mut fcx,
+        "x ",
+        WhiteSpaceCollapse::BreakSpaces,
+        TextWrapMode::Wrap,
+    )
+    .calculate_content_widths();
+
+    assert_eq!(collapse.min, preserve.min);
+    assert!(preserve.max > collapse.max);
+    assert!(break_spaces.min > preserve.min);
+    assert_eq!(break_spaces.max, preserve.max);
+}
+
+#[test]
+fn break_spaces_breaks_after_each_preserved_space() {
+    let mut fcx = create_font_context();
+    let mut layout = build_white_space_layout(
+        &mut fcx,
+        "A   B",
+        WhiteSpaceCollapse::BreakSpaces,
+        TextWrapMode::Wrap,
+    );
+    layout.break_all_lines(Some(0.0));
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.text_range())
+            .collect::<Vec<_>>(),
+        [0..2, 2..3, 3..4, 4..5],
+    );
+}
+
+#[test]
+fn white_space_semantics_follow_each_style_run() {
+    let text = "A   B";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+    let collapse = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        white_space_collapse: WhiteSpaceCollapse::Collapse,
+        ..TextStyle::default()
+    });
+    let break_spaces = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        white_space_collapse: WhiteSpaceCollapse::BreakSpaces,
+        ..TextStyle::default()
+    });
+    builder.set_root_style(collapse);
+    builder.push_style_run(collapse, 0..1);
+    builder.push_style_run(break_spaces, 1..4);
+    builder.push_style_run(collapse, 4..5);
+
+    let mut layout = builder.build(text);
+    layout.break_all_lines(Some(0.0));
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.text_range())
+            .collect::<Vec<_>>(),
+        [0..2, 2..3, 3..4, 4..5],
+    );
+}
+
+#[test]
+fn break_spaces_opportunity_propagates_through_inline_end() {
+    let text = "A  B";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+    let style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        white_space_collapse: WhiteSpaceCollapse::BreakSpaces,
+        ..TextStyle::default()
+    });
+    builder.set_root_style(style);
+    builder.push_style_run(style, ..);
+    push_test_inline_box_at(
+        &mut builder,
+        0,
+        InlineBoxKind::InlineStart,
+        0,
+        0.0,
+        Some(style),
+    );
+    push_test_inline_box_at(
+        &mut builder,
+        1,
+        InlineBoxKind::InlineEnd,
+        2,
+        0.0,
+        Some(style),
+    );
+
+    let mut layout = builder.build(text);
+    layout.break_all_lines(Some(0.0));
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.text_range())
+            .collect::<Vec<_>>(),
+        [0..2, 2..3, 3..4],
+    );
+}
+
+#[test]
+fn preserved_trailing_space_hangs_only_when_wrapping_allows_it() {
+    let mut fcx = create_font_context();
+    let measure = |fcx: &mut FontContext, text: &str, mode, wrap, width| {
+        let mut layout = build_white_space_layout(fcx, text, mode, wrap);
+        layout.break_all_lines(width);
+        layout
+    };
+
+    let text_width = measure(
+        &mut fcx,
+        "xx",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+        None,
+    )
+    .width();
+    let full_width = measure(
+        &mut fcx,
+        "xx ",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::NoWrap,
+        None,
+    )
+    .width();
+    let constraint = (text_width + full_width) * 0.5;
+
+    let wrap = measure(
+        &mut fcx,
+        "xx ",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+        Some(constraint),
+    );
+    assert_eq!(wrap.len(), 1);
+    assert!((wrap.width() - constraint).abs() < 0.01);
+
+    let nowrap = measure(
+        &mut fcx,
+        "xx ",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::NoWrap,
+        Some(constraint),
+    );
+    assert_eq!(nowrap.len(), 1);
+    assert!((nowrap.width() - full_width).abs() < 0.01);
+    assert_eq!(nowrap.get(0).unwrap().metrics().trailing_whitespace, 0.0);
+
+    let collapsed = measure(
+        &mut fcx,
+        "xx ",
+        WhiteSpaceCollapse::Collapse,
+        TextWrapMode::Wrap,
+        None,
+    );
+    assert!((collapsed.width() - text_width).abs() < 0.01);
+}
+
+#[test]
+fn phase_two_removal_is_scoped_to_a_line_break() {
+    let mut fcx = create_font_context();
+    let mut layout = build_white_space_layout(
+        &mut fcx,
+        "xx xx",
+        WhiteSpaceCollapse::Collapse,
+        TextWrapMode::Wrap,
+    );
+    let max_width = layout.calculate_content_widths().max;
+    let min_width = layout.calculate_content_widths().min;
+
+    layout.break_all_lines(Some(min_width));
+    assert_eq!(layout.len(), 2);
+
+    // Rebreaking must start from immutable shaping metrics; a space removed at
+    // the first narrow line end becomes internal content at the wider width.
+    layout.break_all_lines(None);
+    assert_eq!(layout.len(), 1);
+    assert!((layout.full_width() - max_width).abs() < 0.01);
+}
+
+#[test]
+fn phase_two_removed_space_does_not_offset_a_trailing_inline_edge() {
+    let text = "xx xx";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+    let style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        white_space_collapse: WhiteSpaceCollapse::Collapse,
+        ..TextStyle::default()
+    });
+    builder.set_root_style(style);
+    builder.push_style_run(style, ..);
+    push_test_inline_box_at(
+        &mut builder,
+        0,
+        InlineBoxKind::InlineStart,
+        0,
+        8.0,
+        Some(style),
+    );
+    push_test_inline_box_at(
+        &mut builder,
+        1,
+        InlineBoxKind::InlineEnd,
+        3,
+        8.0,
+        Some(style),
+    );
+    push_test_inline_box_at(
+        &mut builder,
+        2,
+        InlineBoxKind::InlineStart,
+        3,
+        8.0,
+        Some(style),
+    );
+    push_test_inline_box_at(
+        &mut builder,
+        3,
+        InlineBoxKind::InlineEnd,
+        text.len(),
+        8.0,
+        Some(style),
+    );
+
+    let mut layout = builder.build(text);
+    let min_width = layout.calculate_content_widths().min;
+    layout.break_all_lines(Some(min_width));
+    assert_eq!(layout.len(), 2);
+    let line = layout.get(0).expect("one line");
+    let end = line
+        .items()
+        .find_map(|item| match item {
+            PositionedLayoutItem::InlineBox(inline_box) if inline_box.id == 1 => Some(inline_box),
+            PositionedLayoutItem::GlyphRun(_) | PositionedLayoutItem::InlineBox(_) => None,
+        })
+        .expect("trailing inline edge");
+
+    assert!((end.x + end.width - line.metrics().advance).abs() < 0.01);
+}
+
+#[test]
+fn no_break_space_is_visible_and_non_breaking_at_line_end() {
+    let mut fcx = create_font_context();
+    let mut text = build_white_space_layout(
+        &mut fcx,
+        "xx",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+    );
+    text.break_all_lines(None);
+    let text_width = text.width();
+
+    let mut full = build_white_space_layout(
+        &mut fcx,
+        "xx\u{00a0}",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+    );
+    full.break_all_lines(None);
+    let full_width = full.width();
+    assert!(full_width > text_width);
+
+    let mut constrained = build_white_space_layout(
+        &mut fcx,
+        "xx\u{00a0}",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+    );
+    constrained.break_all_lines(Some((text_width + full_width) * 0.5));
+    assert_eq!(constrained.len(), 1);
+    assert!((constrained.width() - full_width).abs() < 0.01);
+    assert_eq!(
+        constrained.get(0).unwrap().metrics().trailing_whitespace,
+        0.0
+    );
 }
 
 /// Test that `StyleRunBuilder` handles a first run whose style table index is not zero.
@@ -694,10 +1017,21 @@ fn push_test_inline_box(
     width: f32,
     style_after: Option<u16>,
 ) {
+    push_test_inline_box_at(builder, id, kind, 0, width, style_after);
+}
+
+fn push_test_inline_box_at(
+    builder: &mut StyleRunBuilder<'_, ColorBrush>,
+    id: u64,
+    kind: InlineBoxKind,
+    index: usize,
+    width: f32,
+    style_after: Option<u16>,
+) {
     let inline_box = InlineBox {
         id,
         kind,
-        index: 0,
+        index,
         width,
         height: if kind == InlineBoxKind::InFlow {
             20.0
@@ -808,4 +1142,89 @@ fn inline_style_boundaries_restore_parent_style() {
 
     layout.break_all_lines(Some(64.0));
     assert_eq!(line_advances(&layout), [64.0, 64.0, 64.0]);
+}
+
+#[test]
+fn inline_start_moves_with_content_past_hanging_whitespace() {
+    let text = "x x";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+    let style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        white_space_collapse: WhiteSpaceCollapse::Collapse,
+        ..TextStyle::default()
+    });
+    builder.set_root_style(style);
+    builder.push_style_run(style, ..);
+    for (id, kind, index) in [
+        (0, InlineBoxKind::InlineStart, 0),
+        (1, InlineBoxKind::InlineEnd, 1),
+        (2, InlineBoxKind::InlineStart, 1),
+        (3, InlineBoxKind::InlineEnd, 3),
+    ] {
+        push_test_inline_box_at(&mut builder, id, kind, index, 8.0, None);
+    }
+
+    let mut layout = builder.build(text);
+    let line_width = layout.calculate_content_widths().min;
+    layout.break_all_lines(Some(line_width));
+    let inline_ids = layout
+        .lines()
+        .map(|line| {
+            line.items()
+                .filter_map(|item| match item {
+                    PositionedLayoutItem::InlineBox(inline_box) => Some(inline_box.id),
+                    PositionedLayoutItem::GlyphRun(_) => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inline_ids, [vec![0, 1], vec![2, 3]]);
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.text_range())
+            .collect::<Vec<_>>(),
+        [0..1, 2..3]
+    );
+    let advances = line_advances(&layout);
+    assert_eq!(advances.len(), 2);
+    assert_eq!(advances[0], advances[1]);
+}
+
+#[test]
+fn justification_counts_only_non_hanging_spaces() {
+    let mut fcx = create_font_context();
+    let mut visible = build_white_space_layout(
+        &mut fcx,
+        "aa aa",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+    );
+    visible.break_all_lines(None);
+    let visible_width = visible.width();
+
+    let mut full = build_white_space_layout(
+        &mut fcx,
+        "aa aa   ",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+    );
+    full.break_all_lines(None);
+    let space_width = (full.full_width() - visible_width) / 3.0;
+
+    let mut layout = build_white_space_layout(
+        &mut fcx,
+        "aa aa   aa",
+        WhiteSpaceCollapse::Preserve,
+        TextWrapMode::Wrap,
+    );
+    layout.break_all_lines(Some(visible_width + 1.5 * space_width));
+    assert_eq!(layout.data.lines.len(), 2);
+    assert_eq!(
+        layout.data.lines[0].break_reason,
+        crate::BreakReason::Regular
+    );
+    assert_eq!(layout.data.lines[0].num_spaces, 1);
 }

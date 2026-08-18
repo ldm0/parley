@@ -190,12 +190,30 @@ impl<'a, B: Brush> Cluster<'a, B> {
         self.first_character().style_index
     }
 
+    /// Returns whether CSS phase-II white-space processing removed this
+    /// cluster from the containing line.
+    ///
+    /// Removed clusters retain their text range for editing and source
+    /// mapping, but contribute neither advance nor positioned glyphs.
+    pub fn is_removed(&self) -> bool {
+        let Some(line_data) = self.run.line_data else {
+            return false;
+        };
+        let text_range = self.text_range();
+        !line_data.removed_text_range.is_empty()
+            && line_data.removed_text_range.start <= text_range.start
+            && text_range.end <= line_data.removed_text_range.end
+    }
+
     /// Returns the advance of the cluster.
     ///
     /// If a shaped cluster crosses this grapheme cluster's boundaries (see
     /// [`Self::is_ligature_continuation`]), the shaped cluster's advance is split evenly over the
     /// clusters it overlaps.
     pub fn advance(&self) -> f32 {
+        if self.is_removed() {
+            return 0.0;
+        }
         self.grapheme.advance()
     }
 
@@ -249,8 +267,7 @@ impl<'a, B: Brush> Cluster<'a, B> {
     /// cluster: for a ligature, the ligature start yields all of the ligature's glyphs and the
     /// continuations yield none.
     pub fn glyphs(&self) -> impl Iterator<Item = Glyph> + Clone + use<'a, B> {
-        self.grapheme
-            .is_atom_start()
+        (self.grapheme.is_atom_start() && !self.is_removed())
             .then(|| self.run.glyphs_in(self.atom.shaped_clusters_range()))
             .into_iter()
             .flatten()

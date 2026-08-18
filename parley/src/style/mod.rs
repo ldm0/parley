@@ -20,10 +20,57 @@ pub use styleset::StyleSet;
 
 use crate::util::nearly_eq;
 
-#[derive(Debug, Clone, Copy)]
+/// Controls how white space and segment breaks inside text are collapsed.
+///
+/// This mirrors the CSS [`white-space-collapse`] property.
+///
+/// [`white-space-collapse`]: https://drafts.csswg.org/css-text-4/#white-space-collapsing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WhiteSpaceCollapse {
+    /// White space sequences and segment breaks are collapsed.
     Collapse,
+    /// White space sequences and segment breaks are preserved.
+    #[default]
     Preserve,
+    /// White space sequences are collapsed, while segment breaks are preserved.
+    PreserveBreaks,
+    /// White space sequences are preserved, while tabs and segment breaks are converted to spaces.
+    PreserveSpaces,
+    /// Like [`Preserve`](Self::Preserve), with a soft-wrap opportunity after
+    /// every preserved space and no hanging end-of-line spaces.
+    BreakSpaces,
+}
+
+impl WhiteSpaceCollapse {
+    /// Returns the phase-II treatment of white space at a line end.
+    ///
+    /// Preserved spaces hang only when wrapping is enabled. Under `nowrap`
+    /// they remain part of the used width. `break-spaces` always keeps them in
+    /// the used width.
+    pub(crate) fn end_of_line_whitespace(
+        self,
+        text_wrap_mode: TextWrapMode,
+    ) -> EndOfLineWhitespace {
+        match self {
+            Self::Collapse | Self::PreserveBreaks => EndOfLineWhitespace::Remove,
+            Self::Preserve | Self::PreserveSpaces => match text_wrap_mode {
+                TextWrapMode::Wrap => EndOfLineWhitespace::Hang,
+                TextWrapMode::NoWrap => EndOfLineWhitespace::TakesUpSpace,
+            },
+            Self::BreakSpaces => EndOfLineWhitespace::TakesUpSpace,
+        }
+    }
+}
+
+/// Phase-II treatment of white space at a line end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EndOfLineWhitespace {
+    /// Excluded from used widths and intrinsic sizes.
+    Remove,
+    /// Excluded at soft wraps and conditionally at forced/end-of-block lines.
+    Hang,
+    /// Always contributes to used widths and intrinsic sizes.
+    TakesUpSpace,
 }
 
 /// The height that this text takes up. The default is `MetricsRelative(1.0)`, which is the given
@@ -117,6 +164,8 @@ pub enum StyleProperty<'a, B: Brush> {
     OverflowWrap(OverflowWrap),
     /// Control over non-"emergency" line-breaking.
     TextWrapMode(TextWrapMode),
+    /// Control over white-space collapsing and phase-II line-end handling.
+    WhiteSpaceCollapse(WhiteSpaceCollapse),
 }
 
 /// Unresolved styles.
@@ -168,6 +217,12 @@ pub struct TextStyle<'family, 'settings, B: Brush> {
     pub overflow_wrap: OverflowWrap,
     /// Control over non-"emergency" line-breaking.
     pub text_wrap_mode: TextWrapMode,
+    /// Control over white-space collapsing and phase-II line-end handling.
+    ///
+    /// [`crate::TreeBuilder`] performs phase-I normalization while text is
+    /// pushed. [`crate::StyleRunBuilder`] accepts already-normalized text and
+    /// uses this value for phase-II layout semantics.
+    pub white_space_collapse: WhiteSpaceCollapse,
 }
 
 impl<B: Brush> Default for TextStyle<'static, 'static, B> {
@@ -196,6 +251,7 @@ impl<B: Brush> Default for TextStyle<'static, 'static, B> {
             word_break: WordBreak::default(),
             overflow_wrap: OverflowWrap::default(),
             text_wrap_mode: TextWrapMode::default(),
+            white_space_collapse: WhiteSpaceCollapse::default(),
         }
     }
 }
@@ -239,6 +295,12 @@ impl<B: Brush> From<GenericFamily> for StyleProperty<'_, B> {
 impl<B: Brush> From<LineHeight> for StyleProperty<'_, B> {
     fn from(value: LineHeight) -> Self {
         StyleProperty::LineHeight(value)
+    }
+}
+
+impl<B: Brush> From<WhiteSpaceCollapse> for StyleProperty<'_, B> {
+    fn from(value: WhiteSpaceCollapse) -> Self {
+        StyleProperty::WhiteSpaceCollapse(value)
     }
 }
 

@@ -4,7 +4,7 @@
 use crate::inline_box::InlineBox;
 use crate::layout::{ContentWidths, LineMetrics, Style};
 use crate::resolve::ResolvedStyle;
-use crate::style::Brush;
+use crate::style::{Brush, EndOfLineWhitespace, WhiteSpaceCollapse};
 use crate::util::nearly_zero;
 use crate::{IndentOptions, InlineBoxKind, LineHeight, OverflowWrap, TextWrapMode};
 use core::ops::Range;
@@ -75,12 +75,13 @@ pub(crate) struct LineItemData {
 
     // Fields that only apply to text runs (Ignored for boxes)
     // TODO: factor this out?
-    /// True if the run is composed entirely of whitespace.
-    pub(crate) is_whitespace: bool,
-    /// True if the run ends in whitespace.
-    pub(crate) has_trailing_whitespace: bool,
+    /// True if the item contains only white space that may be removed or hang.
+    pub(crate) is_ignorable_whitespace: bool,
     /// Range of the source text.
     pub(crate) text_range: Range<usize>,
+    /// Phase-II removed white space within this line item. The source range is
+    /// retained for caret mapping, but its per-line advance is zero.
+    pub(crate) removed_text_range: Range<usize>,
     /// This run's shaped clusters on this line, as a range into [`ShapedText::shaped_clusters`].
     ///
     /// The bounds are atom-aligned.
@@ -100,10 +101,10 @@ impl LineItemData {
         self.bidi_level.is_rtl()
     }
 
-    /// If the item is a text run
-    ///   - Determine if it consists entirely of whitespace (`is_whitespace` property)
-    ///   - Determine if it has trailing whitespace (`has_trailing_whitespace` property)
-    pub(crate) fn compute_whitespace_properties<B: Brush>(&mut self, layout_data: &LayoutData<B>) {
+    /// Determine whether this item consists entirely of removable/hanging
+    /// white space. White space that takes up space and no-break spaces count
+    /// as real content here.
+    pub(crate) fn compute_ignorable_whitespace<B: Brush>(&mut self, layout_data: &LayoutData<B>) {
         // Skip items which are not text runs
         if self.kind != LayoutItemKind::TextRun {
             return;
@@ -118,28 +119,18 @@ impl LineItemData {
                 ..clusters[range.end as usize - 1].chars_range().end as usize
         };
         let characters = &layout_data.shaped_text.characters()[char_range];
+        let is_trailing_whitespace = |character: &parley_engine::shape::Character| {
+            let style = &layout_data.styles[character.style_index as usize];
+            character.info.is_whitespace()
+                && character.info.whitespace() != Whitespace::NoBreakSpace
+                && style
+                    .white_space_collapse
+                    .end_of_line_whitespace(style.text_wrap_mode)
+                    != EndOfLineWhitespace::TakesUpSpace
+        };
 
-        self.is_whitespace = true;
-        if self.is_rtl() {
-            // RTL runs check for "trailing" whitespace at the front.
-            for character in characters {
-                if character.info.is_whitespace() {
-                    self.has_trailing_whitespace = true;
-                } else {
-                    self.is_whitespace = false;
-                    break;
-                }
-            }
-        } else {
-            for character in characters.iter().rev() {
-                if character.info.is_whitespace() {
-                    self.has_trailing_whitespace = true;
-                } else {
-                    self.is_whitespace = false;
-                    break;
-                }
-            }
-        }
+        self.is_ignorable_whitespace =
+            !characters.is_empty() && characters.iter().all(is_trailing_whitespace);
     }
 }
 
@@ -377,10 +368,12 @@ impl<B: Brush> LayoutData<B> {
     // TODO: this method does not handle mixed direction text at all.
     #[expect(clippy::cast_possible_truncation, reason = "deferred")]
     pub(crate) fn calculate_content_widths(&self) -> ContentWidths {
-        fn whitespace_advance(atom: Option<(Whitespace, f32)>) -> f32 {
-            atom.filter(|(whitespace, _)| whitespace.is_space_or_nbsp())
-                .map_or(0.0, |(_, advance)| advance)
-        }
+        let end_of_line = |character: &parley_engine::shape::Character| {
+            let style = &self.styles[character.style_index as usize];
+            style
+                .white_space_collapse
+                .end_of_line_whitespace(style.text_wrap_mode)
+        };
 
         let mut min_width = 0.0_f32;
         let mut max_width = 0.0_f32;
@@ -394,26 +387,21 @@ impl<B: Brush> LayoutData<B> {
         let mut break_after_pending = false;
         let mut text_wrap_mode = self.styles[usize::from(self.root_style_index)].text_wrap_mode;
         let mut last_content_text_wrap_mode = None;
-        // The whitespace class of the previous atom's first character, and the atom's advance.
-        let mut prev_atom: Option<(Whitespace, f32)> = None;
-        let is_rtl = self.base_level.is_rtl();
+        // White space excluded from min-content hangs or is removed. Only
+        // removed white space is excluded from max-content; conditionally
+        // hanging white space counts at the forced break ending that measure.
+        let mut min_trailing_whitespace = 0.0_f32;
+        let mut max_trailing_whitespace = 0.0_f32;
         for item in &self.items {
             match item.kind {
                 LayoutItemKind::TextRun => {
                     let slice = self.shaped_text.run_slice(item.index as u32);
-                    if is_rtl {
-                        prev_atom = slice.atoms_start().next().map(|atom| {
-                            let character = &atom.characters()[0];
-                            (character.info.whitespace(), atom.advance())
-                        });
-                    }
                     for atom in slice.atoms_start() {
                         if break_after_pending {
-                            let trailing_whitespace = whitespace_advance(prev_atom);
-                            min_width = min_width.max(running_min_width - trailing_whitespace);
+                            min_width = min_width.max(running_min_width - min_trailing_whitespace);
                             running_min_width = 0.0;
+                            min_trailing_whitespace = 0.0;
                             break_after_pending = false;
-                            prev_atom = None;
                         }
                         let character = &atom.characters()[0];
                         let boundary = character.info.boundary();
@@ -425,69 +413,119 @@ impl<B: Brush> LayoutData<B> {
                                 && (boundary == Boundary::Line
                                     || style.overflow_wrap == OverflowWrap::Anywhere))
                         {
-                            let trailing_whitespace = whitespace_advance(prev_atom);
                             min_width = min_width.max(
                                 running_min_width
                                     - pending_inline_start_width
-                                    - trailing_whitespace,
+                                    - min_trailing_whitespace,
                             );
                             running_min_width = pending_inline_start_width;
+                            min_trailing_whitespace = 0.0;
                             if boundary == Boundary::Mandatory {
-                                max_width = max_width.max(running_max_width - trailing_whitespace);
+                                max_width =
+                                    max_width.max(running_max_width - max_trailing_whitespace);
                                 running_max_width = 0.0;
+                                max_trailing_whitespace = 0.0;
                             }
                         }
-                        running_min_width += atom.advance();
-                        running_max_width += atom.advance();
-                        pending_inline_start_width = 0.0;
-                        last_content_text_wrap_mode = Some(style.text_wrap_mode);
-                        if !is_rtl {
-                            prev_atom = Some((character.info.whitespace(), atom.advance()));
+                        let advance = atom.advance();
+                        running_min_width += advance;
+                        running_max_width += advance;
+
+                        let whitespace = character.info.whitespace();
+                        let is_ideographic_space = character.info.source_char() == '\u{3000}';
+                        if style.text_wrap_mode == TextWrapMode::Wrap
+                            && style.white_space_collapse == WhiteSpaceCollapse::BreakSpaces
+                            && (matches!(whitespace, Whitespace::Space | Whitespace::Tab)
+                                || is_ideographic_space)
+                        {
+                            min_width = min_width.max(running_min_width);
+                            running_min_width = 0.0;
+                            min_trailing_whitespace = 0.0;
                         }
+
+                        let eol = end_of_line(character);
+                        match whitespace {
+                            Whitespace::Space | Whitespace::Tab => {
+                                if eol == EndOfLineWhitespace::TakesUpSpace {
+                                    min_trailing_whitespace = 0.0;
+                                } else {
+                                    min_trailing_whitespace += advance;
+                                }
+                                if eol == EndOfLineWhitespace::Remove {
+                                    max_trailing_whitespace += advance;
+                                } else {
+                                    max_trailing_whitespace = 0.0;
+                                }
+                            }
+                            // Segment breaks have zero advance and do not end a
+                            // preceding trailing-white-space run.
+                            Whitespace::Newline => {}
+                            Whitespace::None
+                                if is_ideographic_space
+                                    && eol != EndOfLineWhitespace::TakesUpSpace =>
+                            {
+                                min_trailing_whitespace += advance;
+                                max_trailing_whitespace += advance;
+                            }
+                            _ => {
+                                min_trailing_whitespace = 0.0;
+                                max_trailing_whitespace = 0.0;
+                            }
+                        }
+                        let is_hanging_or_removed =
+                            (matches!(whitespace, Whitespace::Space | Whitespace::Tab)
+                                || is_ideographic_space)
+                                && eol != EndOfLineWhitespace::TakesUpSpace;
+                        if !is_hanging_or_removed {
+                            pending_inline_start_width = 0.0;
+                        }
+                        last_content_text_wrap_mode = Some(style.text_wrap_mode);
                     }
-                    let trailing_whitespace = whitespace_advance(prev_atom);
-                    min_width = min_width.max(running_min_width - trailing_whitespace);
+                    min_width = min_width.max(running_min_width - min_trailing_whitespace);
                 }
                 LayoutItemKind::InlineBox => {
-                    let ibox = &self.inline_boxes[item.index];
-                    match ibox.kind {
+                    let inline_box = &self.inline_boxes[item.index];
+                    match inline_box.kind {
                         InlineBoxKind::InFlow => {
                             if break_after_pending {
-                                let trailing_whitespace = whitespace_advance(prev_atom);
-                                min_width = min_width.max(running_min_width - trailing_whitespace);
+                                min_width =
+                                    min_width.max(running_min_width - min_trailing_whitespace);
                                 running_min_width = 0.0;
+                                min_trailing_whitespace = 0.0;
                             }
-                            running_max_width += ibox.width;
+                            running_max_width += inline_box.width;
                             let can_break_before = text_wrap_mode == TextWrapMode::Wrap
                                 || last_content_text_wrap_mode == Some(TextWrapMode::Wrap);
                             if can_break_before {
-                                let trailing_whitespace = whitespace_advance(prev_atom);
                                 min_width = min_width.max(
                                     running_min_width
                                         - pending_inline_start_width
-                                        - trailing_whitespace,
+                                        - min_trailing_whitespace,
                                 );
                                 running_min_width = pending_inline_start_width;
                             }
-                            running_min_width += ibox.width;
+                            running_min_width += inline_box.width;
                             pending_inline_start_width = 0.0;
                             break_after_pending = text_wrap_mode == TextWrapMode::Wrap;
                             last_content_text_wrap_mode = Some(text_wrap_mode);
+                            min_trailing_whitespace = 0.0;
+                            max_trailing_whitespace = 0.0;
                         }
                         InlineBoxKind::InlineStart => {
                             if break_after_pending {
-                                let trailing_whitespace = whitespace_advance(prev_atom);
-                                min_width = min_width.max(running_min_width - trailing_whitespace);
+                                min_width =
+                                    min_width.max(running_min_width - min_trailing_whitespace);
                                 running_min_width = 0.0;
+                                min_trailing_whitespace = 0.0;
                                 break_after_pending = false;
                             }
-                            running_min_width += ibox.width;
-                            running_max_width += ibox.width;
-                            pending_inline_start_width += ibox.width;
+                            running_min_width += inline_box.width;
+                            running_max_width += inline_box.width;
+                            pending_inline_start_width += inline_box.width;
                         }
                         InlineBoxKind::InlineEnd => {
-                            running_min_width += ibox.width;
-                            running_max_width += ibox.width;
+                            running_min_width += inline_box.width;
+                            running_max_width += inline_box.width;
                             pending_inline_start_width = 0.0;
                         }
                         InlineBoxKind::OutOfFlow | InlineBoxKind::CustomOutOfFlow => {}
@@ -495,17 +533,12 @@ impl<B: Brush> LayoutData<B> {
                     if let Some(style_index) = item.style_after {
                         text_wrap_mode = self.styles[usize::from(style_index)].text_wrap_mode;
                     }
-                    if ibox.kind.contributes_advance() {
-                        prev_atom = None;
-                    }
                 }
             }
-            let trailing_whitespace = whitespace_advance(prev_atom);
-            max_width = max_width.max(running_max_width - trailing_whitespace);
+            max_width = max_width.max(running_max_width - max_trailing_whitespace);
         }
 
-        let trailing_whitespace = whitespace_advance(prev_atom);
-        min_width = min_width.max(running_min_width - trailing_whitespace);
+        min_width = min_width.max(running_min_width - min_trailing_whitespace);
 
         ContentWidths {
             min: min_width,

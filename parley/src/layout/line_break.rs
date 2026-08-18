@@ -15,7 +15,7 @@ use crate::layout::{
     BreakReason, Layout, LayoutData, LayoutItem, LayoutItemKind, LineData, LineItemData,
     LineMetrics, Run,
 };
-use crate::style::Brush;
+use crate::style::{Brush, EndOfLineWhitespace, WhiteSpaceCollapse, WordBreak};
 use crate::{InlineBoxKind, OverflowWrap, TextWrapMode};
 
 use core::ops::Range;
@@ -42,7 +42,6 @@ struct LineState {
     /// The line's shaped clusters, as a range into [`parley_engine::ShapedText::shaped_clusters`].
     /// The bounds are atom-aligned.
     clusters: Range<u32>,
-    num_spaces: usize,
     box_metrics: LineBoxMetrics,
     /// This is set to true if we encounter something on the line (either a glyph or an inline box)
     /// that is taller than the `line_max_height`. When in this state `break_next` should yield control
@@ -171,6 +170,8 @@ struct PrevBoundaryState {
     item_idx: usize,
     run_idx: usize,
     cluster_idx: u32,
+    /// The boundary follows a preserved white-space atom in `break-spaces`.
+    after_break_spaces_space: bool,
     state: LineState,
 }
 
@@ -284,6 +285,10 @@ pub struct BreakerState {
     /// The state of the current line
     line: LineState,
 
+    /// Whether the most recently inspected atom was preserved white space in
+    /// `break-spaces`; used to distinguish the opportunities that mode adds.
+    prev_atom_was_break_spaces_space: bool,
+
     // Saved breaker states for reverting to a previously encountered line-breaking opportunity
     /// Saved breaker state for the last non-emergency line-breaking opportunity
     prev_boundary: Option<PrevBoundaryState>,
@@ -314,6 +319,7 @@ impl Default for BreakerState {
             line_max_advance: 0.0,
             line_max_height: f32::MAX,
             line: LineState::default(),
+            prev_atom_was_break_spaces_space: false,
             prev_boundary: None,
             emergency_boundary: None,
             pending_inline_start: None,
@@ -372,13 +378,16 @@ impl BreakerState {
 
     /// Store the current iteration state so that we can revert to it if we later want to take
     /// the line breaking opportunity at this point.
-    fn mark_line_break_opportunity(&mut self) {
-        self.prev_boundary = Some(self.boundary_state());
+    fn mark_line_break_opportunity(&mut self, after_break_spaces_space: bool) {
+        let mut boundary = self.boundary_state();
+        boundary.after_break_spaces_space = after_break_spaces_space;
+        self.prev_boundary = Some(boundary);
         self.propagating_break_after = true;
     }
 
-    fn mark_line_break_opportunity_before_content(&mut self) {
-        let boundary = self.break_before_content();
+    fn mark_line_break_opportunity_before_content(&mut self, after_break_spaces_space: bool) {
+        let mut boundary = self.break_before_content();
+        boundary.after_break_spaces_space = after_break_spaces_space;
         if boundary.has_content() {
             self.prev_boundary = Some(boundary);
         }
@@ -390,6 +399,7 @@ impl BreakerState {
             item_idx: self.item_idx,
             run_idx: self.run_idx,
             cluster_idx: self.cluster_idx,
+            after_break_spaces_space: false,
             state: self.line.clone(),
         }
     }
@@ -402,9 +412,15 @@ impl BreakerState {
     }
 
     fn break_before_content(&mut self) -> PrevBoundaryState {
-        self.pending_inline_start
-            .take()
-            .unwrap_or_else(|| self.boundary_state())
+        if let Some(mut boundary) = self.pending_inline_start.take() {
+            // Structural start edges move with the first real content. White
+            // space consumed after the edge may hang or be removed, so resume
+            // the text stream after it while replaying the edge itself.
+            boundary.cluster_idx = self.cluster_idx;
+            boundary
+        } else {
+            self.boundary_state()
+        }
     }
 
     fn finish_content(&mut self, text_wrap_mode: TextWrapMode) {
@@ -414,10 +430,24 @@ impl BreakerState {
         self.line.has_content = true;
     }
 
+    /// Records hanging/removable white space without letting it detach a
+    /// pending inline-start edge from the first non-white-space content.
+    fn finish_hanging_whitespace(&mut self, text_wrap_mode: TextWrapMode) {
+        self.last_content_text_wrap_mode = Some(text_wrap_mode);
+        self.propagating_break_after = false;
+        self.line.has_content = true;
+    }
+
     fn propagate_break_after_inline_end(&mut self) {
         self.pending_inline_start = None;
         if self.propagating_break_after {
-            self.prev_boundary = Some(self.boundary_state());
+            let after_break_spaces_space = self
+                .prev_boundary
+                .as_ref()
+                .is_some_and(|boundary| boundary.after_break_spaces_space);
+            let mut boundary = self.boundary_state();
+            boundary.after_break_spaces_space = after_break_spaces_space;
+            self.prev_boundary = Some(boundary);
         }
     }
 
@@ -434,6 +464,7 @@ impl BreakerState {
         self.item_idx = prev_state.item_idx;
         self.run_idx = prev_state.run_idx;
         self.cluster_idx = prev_state.cluster_idx;
+        self.prev_atom_was_break_spaces_space = prev_state.after_break_spaces_space;
         self.line = prev_state.state;
     }
 
@@ -548,11 +579,17 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
         self.state.items = self.lines.line_items.len();
         self.state.lines = self.lines.lines.len();
+        // A line can replay structural start edges from an earlier item while
+        // resuming text after discarded phase-II white space. The new line's
+        // text range must start at that resumed cursor.
+        self.state.line.clusters.start = self.state.cluster_idx;
+        self.state.line.clusters.end = self.state.cluster_idx;
         self.state.prev_boundary = None;
         self.state.emergency_boundary = None;
         self.state.pending_inline_start = None;
         self.state.last_content_text_wrap_mode = None;
         self.state.propagating_break_after = false;
+        self.state.prev_atom_was_break_spaces_space = false;
 
         // `finish_line` reads the line's accumulated vertical metrics from `self.state.line`, so
         // it must run before we reset the per-line running state.
@@ -785,8 +822,9 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 self.state.line.text_wrap_mode = mode;
                             }
                             self.state.finish_content(text_wrap_mode);
+                            self.state.prev_atom_was_break_spaces_space = false;
                             if text_wrap_mode == TextWrapMode::Wrap {
-                                self.state.mark_line_break_opportunity();
+                                self.state.mark_line_break_opportunity(false);
                             }
                         }
                     }
@@ -807,12 +845,29 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         let first_character = &atom.characters()[0];
                         let whitespace = first_character.info.whitespace();
                         let is_newline = whitespace == Whitespace::Newline;
-                        let is_space = whitespace.is_space_or_nbsp();
                         let boundary = first_character.info.boundary();
                         let metrics = run.font_metrics();
                         let line_height = run.data.line_height;
                         let max_height_exceeded = self.state.line.max_height_exceeded;
                         let style = &self.layout.data.styles[first_character.style_index as usize];
+
+                        let is_break_spaces =
+                            style.white_space_collapse == WhiteSpaceCollapse::BreakSpaces;
+                        let is_ideographic_space = first_character.info.source_char() == '\u{3000}';
+                        let is_break_spaces_space = is_break_spaces
+                            && (matches!(whitespace, Whitespace::Space | Whitespace::Tab)
+                                || is_ideographic_space);
+                        let hangs_or_is_removed =
+                            (matches!(whitespace, Whitespace::Space | Whitespace::Tab)
+                                || is_ideographic_space)
+                                && style
+                                    .white_space_collapse
+                                    .end_of_line_whitespace(style.text_wrap_mode)
+                                    != EndOfLineWhitespace::TakesUpSpace;
+                        let prev_was_break_spaces_space = core::mem::replace(
+                            &mut self.state.prev_atom_was_break_spaces_space,
+                            is_break_spaces_space,
+                        );
 
                         // Lag text_wrap_mode style by one atom
                         let text_wrap_mode = self.state.line.text_wrap_mode;
@@ -822,7 +877,11 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             // We don't record boundaries when the advance is 0. As we do not want overflowing content to cause extra consecutive
                             // line breaks. We should accept the overflowing fragment in that scenario.
                             if self.state.line.x != 0.0 {
-                                self.state.mark_line_break_opportunity_before_content();
+                                let usable_by_break_spaces = prev_was_break_spaces_space
+                                    || style.word_break == WordBreak::BreakAll;
+                                self.state.mark_line_break_opportunity_before_content(
+                                    usable_by_break_spaces,
+                                );
                                 // break_opportunity = true;
                             }
                         } else if is_newline {
@@ -906,7 +965,11 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             if max_height_exceeded {
                                 return self.max_height_break_data(line_height);
                             }
-                            self.state.finish_content(style.text_wrap_mode);
+                            if hangs_or_is_removed {
+                                self.state.finish_hanging_whitespace(style.text_wrap_mode);
+                            } else {
+                                self.state.finish_content(style.text_wrap_mode);
+                            }
                             self.state.append_atom_to_line(
                                 &atom,
                                 next_x,
@@ -914,8 +977,8 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 line_height,
                                 self.layout.data.quantize,
                             );
-                            if is_space {
-                                self.state.line.num_spaces += 1;
+                            if is_break_spaces_space && style.text_wrap_mode == TextWrapMode::Wrap {
+                                self.state.mark_line_break_opportunity(true);
                             }
                         }
                         // Else we attempt to line break:
@@ -924,10 +987,48 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         // in the line. If there is no such line-breaking opportunity (such as if wrapping is disabled), then
                         // we fall back to appending the content to the line anyway.
                         else {
-                            // Case: the atom is a space character (and wrapping is enabled)
-                            //
-                            // We hang any overflowing whitespace and then line-break.
-                            if is_space && text_wrap_mode == TextWrapMode::Wrap {
+                            // Hanging or removable white space is not considered
+                            // for fit. Keep consuming the run; the next actual
+                            // opportunity, forced break, or end commits it.
+                            if hangs_or_is_removed && text_wrap_mode == TextWrapMode::Wrap {
+                                if max_height_exceeded {
+                                    return self.max_height_break_data(line_height);
+                                }
+                                self.state.finish_hanging_whitespace(style.text_wrap_mode);
+                                self.state.append_atom_to_line(
+                                    &atom,
+                                    next_x,
+                                    metrics,
+                                    line_height,
+                                    self.layout.data.quantize,
+                                );
+                                continue;
+                            }
+                            // `break-spaces` adds an opportunity *after* each
+                            // preserved space. It cannot use an unrelated
+                            // regular opportunity before the overflowing space.
+                            else if is_break_spaces_space && text_wrap_mode == TextWrapMode::Wrap
+                            {
+                                if let Some(prev) = self
+                                    .state
+                                    .prev_boundary
+                                    .take_if(|prev| prev.after_break_spaces_space)
+                                {
+                                    self.state.reset_to(prev);
+                                    return self.start_new_line(
+                                        BreakReason::Regular,
+                                        max_advance,
+                                        line_indent,
+                                    );
+                                }
+                                if let Some(prev_emergency) = self.state.emergency_boundary.take() {
+                                    self.state.reset_to(prev_emergency);
+                                    return self.start_new_line(
+                                        BreakReason::Emergency,
+                                        max_advance,
+                                        line_indent,
+                                    );
+                                }
                                 if max_height_exceeded {
                                     return self.max_height_break_data(line_height);
                                 }
@@ -939,11 +1040,8 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                     line_height,
                                     self.layout.data.quantize,
                                 );
-                                return self.start_new_line(
-                                    BreakReason::Regular,
-                                    max_advance,
-                                    line_indent,
-                                );
+                                self.state.mark_line_break_opportunity(true);
+                                continue;
                             }
                             // Case: we have previously encountered a REGULAR line-breaking opportunity in the current line
                             //
@@ -1096,6 +1194,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         self.state.line.text_wrap_mode = mode;
                     }
                     self.state.finish_content(text_wrap_mode);
+                    self.state.prev_atom_was_break_spaces_space = false;
                     char_count += 1;
                     pending_break_reason = BreakReason::Regular;
                 }
@@ -1113,7 +1212,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         let first_character = &atom.characters()[0];
                         let whitespace = first_character.info.whitespace();
                         let is_newline = whitespace == Whitespace::Newline;
-                        let is_space = whitespace.is_space_or_nbsp();
                         let style = &self.layout.data.styles[first_character.style_index as usize];
                         let advance = atom.advance();
 
@@ -1133,16 +1231,16 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                             run.data.line_height,
                             self.layout.data.quantize,
                         );
+                        self.state.prev_atom_was_break_spaces_space = style.white_space_collapse
+                            == WhiteSpaceCollapse::BreakSpaces
+                            && (matches!(whitespace, Whitespace::Space | Whitespace::Tab)
+                                || first_character.info.source_char() == '\u{3000}');
                         char_count += atom.char_range().len() as u32;
                         pending_break_reason = if is_newline {
                             BreakReason::Explicit
                         } else {
                             BreakReason::Regular
                         };
-
-                        if is_space {
-                            self.state.line.num_spaces += 1;
-                        }
                     }
                     self.state.run_idx += 1;
                     self.state.item_idx += 1;
@@ -1265,7 +1363,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     }
                 }
                 LayoutItemKind::TextRun => {
-                    line_item.compute_whitespace_properties(&self.layout.data);
+                    line_item.compute_ignorable_whitespace(&self.layout.data);
 
                     // Compute the text range for the line
                     // Q: Can we not simplify this computation by assuming that items are in order?
@@ -1290,7 +1388,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
                     // Ignore trailing whitespace when deciding whether the line has content
                     // (we are iterating backwards so trailing whitespace comes first)
-                    if !have_metrics && line_item.is_whitespace {
+                    if !have_metrics && line_item.is_ignorable_whitespace {
                         continue;
                     }
 
@@ -1300,50 +1398,220 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             }
         }
 
-        // Reorder the items within the line (if required). Reordering is required if the line contains
-        // a mix of bidi levels (a mix of LTR and RTL text)
+        // UAX #9 rule L1 gives trailing segment/white-space characters the
+        // paragraph embedding level. Split the logically-final run if only a
+        // suffix needs the reset, then normal bidi reordering places the suffix
+        // at the paragraph's visual end edge.
+        let base_level = self.layout.data.base_level;
+        let characters = self.layout.data.shaped_text.characters();
+        let clusters = self.layout.data.shaped_text.shaped_clusters();
+        let is_l1_whitespace = |cluster: &ShapedCluster| {
+            let character = &characters[cluster.chars_range().start as usize];
+            matches!(
+                character.info.whitespace(),
+                Whitespace::Space | Whitespace::Tab | Whitespace::Newline
+            ) || character.info.source_char() == '\u{3000}'
+        };
+        let mut item_idx = line.item_range.end;
+        while item_idx > line.item_range.start {
+            item_idx -= 1;
+            let item = &self.lines.line_items[item_idx];
+            if !item.is_text_run() {
+                let inline_box = &self.layout.data.inline_boxes[item.index];
+                if inline_box.kind == InlineBoxKind::InFlow {
+                    break;
+                }
+                continue;
+            }
+            let item_clusters = &clusters
+                [item.shaped_cluster_range.start as usize..item.shaped_cluster_range.end as usize];
+            let whitespace_count = item_clusters
+                .iter()
+                .rev()
+                .take_while(|cluster| is_l1_whitespace(cluster))
+                .count();
+            if whitespace_count == 0 {
+                break;
+            }
+            if item.bidi_level == base_level && whitespace_count == item_clusters.len() {
+                continue;
+            }
+            needs_reorder = true;
+            if whitespace_count == item_clusters.len() {
+                self.lines.line_items[item_idx].bidi_level = base_level;
+                continue;
+            }
+
+            let item = &self.lines.line_items[item_idx];
+            let split_cluster = item.shaped_cluster_range.end - whitespace_count as u32;
+            let run_slice = self.layout.data.shaped_text.run_slice(item.index as u32);
+            let split_character = clusters[split_cluster as usize].chars_range().start;
+            let split_text = run_slice.text_byte_at(split_character);
+            let whitespace_advance: f32 = clusters
+                [split_cluster as usize..item.shaped_cluster_range.end as usize]
+                .iter()
+                .map(|cluster| cluster.advance)
+                .sum();
+            let whitespace_graphemes =
+                count_graphemes(run_slice.narrow(split_cluster..item.shaped_cluster_range.end));
+
+            let mut whitespace_item = item.clone();
+            whitespace_item.bidi_level = base_level;
+            whitespace_item.advance = whitespace_advance;
+            whitespace_item.shaped_cluster_range = split_cluster..item.shaped_cluster_range.end;
+            whitespace_item.grapheme_range =
+                item.grapheme_range.end - whitespace_graphemes..item.grapheme_range.end;
+            whitespace_item.text_range = split_text..item.text_range.end;
+            whitespace_item.compute_ignorable_whitespace(&self.layout.data);
+
+            let item = &mut self.lines.line_items[item_idx];
+            item.shaped_cluster_range.end = split_cluster;
+            item.grapheme_range.end -= whitespace_graphemes;
+            item.text_range.end = split_text;
+            item.advance -= whitespace_advance;
+            item.compute_ignorable_whitespace(&self.layout.data);
+            self.lines.line_items.insert(item_idx + 1, whitespace_item);
+            line.item_range.end += 1;
+            break;
+        }
+
+        // Reorder the items within the line after the L1 reset.
         let item_count = line.item_range.end - line.item_range.start;
         if needs_reorder && item_count > 1 {
             reorder_line_items(&mut self.lines.line_items[line.item_range.clone()]);
         }
 
-        // Compute size of line's trailing whitespace. "Trailing" is considered the right edge
-        // for LTR text and the left edge for RTL text.
-        let run = if self.layout.is_rtl() {
-            self.lines.line_items[line.item_range.clone()].first()
-        } else {
-            self.lines.line_items[line.item_range.clone()].last()
-        };
-        line.metrics.trailing_whitespace = run
-            .filter(|item| item.is_text_run() && item.has_trailing_whitespace)
-            .map(|run| {
-                fn whitespace_advance<'c, I: Iterator<Item = &'c ShapedCluster>>(
-                    characters: &[Character],
-                    clusters: I,
-                ) -> f32 {
-                    clusters
-                        .take_while(|cluster| {
-                            characters[cluster.chars_range().start as usize
-                                ..cluster.chars_range().end as usize]
-                                .iter()
-                                .all(|c| c.info.whitespace() != Whitespace::None)
-                        })
-                        .map(|cluster| cluster.advance)
-                        .sum()
-                }
-
-                let characters = self.layout.data.shaped_text.characters();
-                let clusters =
-                    &self.layout.data.shaped_text.shaped_clusters()[run.shaped_cluster_range.start
-                        as usize
-                        ..run.shaped_cluster_range.end as usize];
-                if run.is_rtl() {
-                    whitespace_advance(characters, clusters.iter())
-                } else {
-                    whitespace_advance(characters, clusters.iter().rev())
-                }
+        // Count justification opportunities from the committed line rather
+        // than maintaining a speculative count while the breaker backtracks.
+        let characters = self.layout.data.shaped_text.characters();
+        let clusters = self.layout.data.shaped_text.shaped_clusters();
+        let total_justification_spaces = self.lines.line_items[line.item_range.clone()]
+            .iter()
+            .filter(|item| item.is_text_run())
+            .map(|item| {
+                clusters[item.shaped_cluster_range.start as usize
+                    ..item.shaped_cluster_range.end as usize]
+                    .iter()
+                    .filter(|cluster| {
+                        cluster.is_grapheme_start()
+                            && characters[cluster.chars_range().start as usize]
+                                .info
+                                .whitespace()
+                                .is_space_or_nbsp()
+                    })
+                    .count()
             })
-            .unwrap_or(0.0);
+            .sum::<usize>();
+
+        // Walk inward from the paragraph's visual end edge. Structural inline
+        // edges are transparent; an atomic in-flow box terminates the run.
+        let is_rtl = self.layout.is_rtl();
+        let mut removed_clusters = Vec::new();
+        let (unconditional, conditional, trailing_justification_spaces) = {
+            let styles = &self.layout.data.styles;
+            let items = &self.lines.line_items[line.item_range.clone()];
+            let mut unconditional = 0.0;
+            let mut conditional = 0.0;
+            let mut past_conditional_edge = false;
+            let mut seen_hanging = false;
+            let mut trailing_justification_spaces = 0;
+            let mut items_forward;
+            let mut items_reverse;
+            let item_iter: &mut dyn Iterator<Item = (usize, &LineItemData)> = if is_rtl {
+                items_forward = items.iter().enumerate();
+                &mut items_forward
+            } else {
+                items_reverse = items.iter().enumerate().rev();
+                &mut items_reverse
+            };
+
+            'items: for (item_offset, item) in item_iter {
+                if !item.is_text_run() {
+                    if self.layout.data.inline_boxes[item.index].kind == InlineBoxKind::InFlow {
+                        break;
+                    }
+                    continue;
+                }
+                let mut clusters_forward;
+                let mut clusters_reverse;
+                let cluster_iter: &mut dyn Iterator<Item = u32> = if item.is_rtl() == is_rtl {
+                    clusters_reverse = item.shaped_cluster_range.clone().rev();
+                    &mut clusters_reverse
+                } else {
+                    clusters_forward = item.shaped_cluster_range.clone();
+                    &mut clusters_forward
+                };
+                for cluster_idx in cluster_iter {
+                    let cluster = &clusters[cluster_idx as usize];
+                    let hang = trailing_whitespace_hang(cluster, characters, styles);
+                    if !matches!(
+                        hang,
+                        TrailingWhitespaceHang::Skip | TrailingWhitespaceHang::End
+                    ) && cluster.is_grapheme_start()
+                        && characters[cluster.chars_range().start as usize]
+                            .info
+                            .whitespace()
+                            .is_space_or_nbsp()
+                    {
+                        trailing_justification_spaces += 1;
+                    }
+                    match hang {
+                        TrailingWhitespaceHang::Skip => {}
+                        TrailingWhitespaceHang::End => break 'items,
+                        TrailingWhitespaceHang::Removed if !seen_hanging => {
+                            removed_clusters
+                                .push((line.item_range.start + item_offset, cluster_idx));
+                        }
+                        TrailingWhitespaceHang::Conditional if !past_conditional_edge => {
+                            seen_hanging = true;
+                            conditional += cluster.advance;
+                        }
+                        TrailingWhitespaceHang::Conditional
+                        | TrailingWhitespaceHang::Unconditional
+                        | TrailingWhitespaceHang::Removed => {
+                            seen_hanging = true;
+                            past_conditional_edge = true;
+                            unconditional += cluster.advance;
+                        }
+                    }
+                }
+            }
+            (unconditional, conditional, trailing_justification_spaces)
+        };
+
+        // Removed characters keep their source mapping but have zero advance
+        // only in this line. Do not mutate shared shaping data: the layout can
+        // be rebroken at another width later.
+        let mut removed_advance = 0.0;
+        for (item_idx, cluster_idx) in removed_clusters {
+            let cluster = &clusters[cluster_idx as usize];
+            let item = &mut self.lines.line_items[item_idx];
+            let slice = self.layout.data.shaped_text.run_slice(item.index as u32);
+            let text_range = slice.text_byte_range(cluster.chars_range());
+            if item.removed_text_range.is_empty() {
+                item.removed_text_range = text_range;
+            } else {
+                item.removed_text_range.start = item.removed_text_range.start.min(text_range.start);
+                item.removed_text_range.end = item.removed_text_range.end.max(text_range.end);
+            }
+            item.advance -= cluster.advance;
+            removed_advance += cluster.advance;
+        }
+
+        let line = &mut self.lines.lines[line_idx];
+        line.num_spaces = total_justification_spaces.saturating_sub(trailing_justification_spaces);
+        line.metrics.advance -= removed_advance;
+        let conditional_hang = match line.break_reason {
+            BreakReason::Regular | BreakReason::Emergency => conditional,
+            BreakReason::Explicit | BreakReason::None => {
+                (line.metrics.advance - line.max_advance).clamp(0.0, conditional)
+            }
+        };
+        line.metrics.trailing_whitespace = if conditional_hang >= conditional {
+            conditional_hang + unconditional
+        } else {
+            conditional_hang
+        };
 
         // Whether metrics should be quantized to pixel boundaries
         let quantize = self.layout.data.quantize;
@@ -1389,11 +1657,11 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     index,
                     bidi_level: BidiLevel::new(0),
                     advance: 0.,
-                    is_whitespace: false,
-                    has_trailing_whitespace: false,
+                    is_ignorable_whitespace: false,
                     shaped_cluster_range: cluster..cluster,
                     grapheme_range: grapheme..grapheme,
                     text_range: text..text,
+                    removed_text_range: 0..0,
                 });
                 line.item_range = run_index..run_index + 1;
             }
@@ -1476,6 +1744,50 @@ impl<B: Brush> Drop for BreakLines<'_, B> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TrailingWhitespaceHang {
+    /// Hangs regardless of the kind of line break.
+    Unconditional,
+    /// Removed when it is at the actual line end.
+    Removed,
+    /// Hangs fully at a soft wrap and only as needed at a forced/end break.
+    Conditional,
+    /// Zero-advance segment break; continue scanning inward.
+    Skip,
+    /// Visible content or white space that always takes up space.
+    End,
+}
+
+fn trailing_whitespace_hang<B: Brush>(
+    cluster: &ShapedCluster,
+    characters: &[Character],
+    styles: &[crate::layout::Style<B>],
+) -> TrailingWhitespaceHang {
+    let character = &characters[cluster.chars_range().start as usize];
+    let style = &styles[character.style_index as usize];
+    let end_of_line = style
+        .white_space_collapse
+        .end_of_line_whitespace(style.text_wrap_mode);
+    match character.info.whitespace() {
+        Whitespace::Newline => TrailingWhitespaceHang::Skip,
+        Whitespace::NoBreakSpace => TrailingWhitespaceHang::End,
+        Whitespace::Space | Whitespace::Tab => match end_of_line {
+            EndOfLineWhitespace::TakesUpSpace => TrailingWhitespaceHang::End,
+            EndOfLineWhitespace::Remove => TrailingWhitespaceHang::Removed,
+            EndOfLineWhitespace::Hang => TrailingWhitespaceHang::Conditional,
+        },
+        Whitespace::None => {
+            if character.info.source_char() == '\u{3000}'
+                && end_of_line != EndOfLineWhitespace::TakesUpSpace
+            {
+                TrailingWhitespaceHang::Unconditional
+            } else {
+                TrailingWhitespaceHang::End
+            }
+        }
+    }
+}
+
 #[expect(clippy::cast_possible_truncation, reason = "deferred")]
 fn commit_line<B: Brush>(
     layout: &Layout<B>,
@@ -1520,11 +1832,11 @@ fn commit_line<B: Brush>(
                     advance: inline_box.width,
 
                     // These properties are ignored for inline boxes. So we just put a dummy value.
-                    is_whitespace: false,
-                    has_trailing_whitespace: false,
+                    is_ignorable_whitespace: false,
                     shaped_cluster_range: 0..0,
                     grapheme_range: 0..0,
                     text_range: 0..0,
+                    removed_text_range: 0..0,
                 });
 
                 last_item_kind = item.kind;
@@ -1601,11 +1913,11 @@ fn commit_line<B: Brush>(
                     index: item.index,
                     bidi_level: shaped_run.bidi_level,
                     advance: 0.,
-                    is_whitespace: false,
-                    has_trailing_whitespace: false,
+                    is_ignorable_whitespace: false,
                     shaped_cluster_range: cluster_range,
                     grapheme_range,
                     text_range,
+                    removed_text_range: 0..0,
                 });
             }
         }
@@ -1613,26 +1925,12 @@ fn commit_line<B: Brush>(
     // let end_run_idx = lines.line_items.last().map(|item| item.index).unwrap_or(0);
     let end_item_idx = lines.line_items.len();
 
-    // Exclude the trailing space from justification space count. Only subtract if the line actually
-    // ends with an atom starting with a space: with `WordBreak::BreakAll`, regular breaks can land
-    // between non-space graphemes, in which case there is no trailing space to exclude.
-    let mut num_spaces = state.num_spaces;
-    if break_reason == BreakReason::Regular
-        && state.clusters.start < state.clusters.end
-        && shaped_text
-            .run_slice(items_to_commit[last_run_pos].index as u32)
-            .atoms_from(state.clusters.end)
-            .prev()
-            .is_some_and(|atom| atom.characters()[0].info.whitespace().is_space_or_nbsp())
-    {
-        num_spaces = num_spaces.saturating_sub(1);
-    }
-
     lines.lines.push(LineData {
         item_range: start_item_idx..end_item_idx,
         max_advance,
         break_reason,
-        num_spaces,
+        // Computed from committed line content in `finish_line`.
+        num_spaces: 0,
         indent: line_indent,
         metrics: LineMetrics {
             advance: state.x,
@@ -1642,7 +1940,6 @@ fn commit_line<B: Brush>(
     });
 
     // Reset state for the new line
-    state.num_spaces = 0;
     if committed_text_run {
         state.clusters.start = state.clusters.end;
     }
