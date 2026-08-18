@@ -3,7 +3,7 @@
 
 //! Test that the various builders produce the same results.
 
-use std::{borrow::Cow, path::PathBuf, sync::Arc, vec::Vec};
+use std::{borrow::Cow, path::PathBuf, sync::Arc, vec, vec::Vec};
 
 use fontique::{Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, SourceCache};
 use parlance::FontFamilyName;
@@ -12,8 +12,8 @@ use peniko::{Blob, color::palette};
 use super::utils::{ColorBrush, asserts::assert_eq_layout_data};
 use crate::{
     FontContext, FontFamily, FontFeatures, FontVariations, InlineBox, InlineBoxKind, Layout,
-    LayoutContext, LineHeight, OverflowWrap, RangedBuilder, StyleProperty, StyleRunBuilder,
-    TextStyle, TextWrapMode, TreeBuilder, WordBreak,
+    LayoutContext, LineHeight, OverflowWrap, PositionedLayoutItem, RangedBuilder, StyleProperty,
+    StyleRunBuilder, TextStyle, TextWrapMode, TreeBuilder, WhiteSpaceCollapse, WordBreak,
 };
 
 // TODO: `FONT_FAMILY_LIST`, `load_fonts`, and `create_font_context` are
@@ -382,6 +382,55 @@ fn builders_style_runs_match_ranged() {
     });
 
     assert_eq_layout_data(&ranged.data, &runs.data, "style_runs_match_ranged");
+}
+
+#[test]
+fn style_runs_apply_white_space_collapse_to_layout_semantics() {
+    fn content_widths(fcx: &mut FontContext, mode: WhiteSpaceCollapse) -> crate::ContentWidths {
+        let text = "x ";
+        let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+        let mut builder = lcx.style_run_builder(fcx, text, 1.0, false);
+        let style = builder.push_style_with_white_space_collapse(
+            TextStyle {
+                font_family: FontFamily::from(FONT_FAMILY_LIST),
+                ..TextStyle::default()
+            },
+            mode,
+        );
+        builder.push_style_run(style, ..);
+        builder.build(text).calculate_content_widths()
+    }
+
+    let mut fcx = create_font_context();
+    let collapse = content_widths(&mut fcx, WhiteSpaceCollapse::Collapse);
+    let break_spaces = content_widths(&mut fcx, WhiteSpaceCollapse::BreakSpaces);
+    assert!(break_spaces.max > collapse.max);
+}
+
+#[test]
+fn break_spaces_commits_a_saved_space_boundary_before_starting_the_next_line() {
+    let text = "A   B";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+    let style = builder.push_style_with_white_space_collapse(
+        TextStyle {
+            font_family: FontFamily::from(FONT_FAMILY_LIST),
+            ..TextStyle::default()
+        },
+        WhiteSpaceCollapse::BreakSpaces,
+    );
+    builder.push_style_run(style, ..);
+
+    let mut layout = builder.build(text);
+    layout.break_all_lines(Some(0.0));
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.text_range())
+            .collect::<Vec<_>>(),
+        [0..2, 2..3, 3..4, 4..5],
+    );
 }
 
 /// Test that `StyleRunBuilder` handles a first run whose style table index is not zero.
@@ -824,6 +873,182 @@ fn inline_edges_transfer_text_atomic_breaks() {
     assert_eq!(advances.len(), 2);
     assert!(advances[0] < 64.0);
     assert_eq!(advances[1], 80.0);
+}
+
+/// CSS open and close items are transparent to collapsible whitespace. The
+/// whitespace can occur outside either span, before an inline-end edge, or
+/// after an inline-start edge without increasing the longest min-content run.
+#[test]
+fn inline_edges_keep_collapsible_whitespace_out_of_min_content_runs() {
+    fn content_widths(
+        fcx: &mut FontContext,
+        edges: &[(u64, InlineBoxKind, usize)],
+        text_wrap_mode: TextWrapMode,
+    ) -> crate::ContentWidths {
+        let text = "x x";
+        let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+        let mut builder = lcx.style_run_builder(fcx, text, 1.0, false);
+        let style = builder.push_style_with_white_space_collapse(
+            TextStyle {
+                font_family: FontFamily::from(FONT_FAMILY_LIST),
+                text_wrap_mode,
+                ..TextStyle::default()
+            },
+            WhiteSpaceCollapse::Collapse,
+        );
+        builder.push_style_run(style, ..);
+        for &(id, kind, index) in edges {
+            push_test_inline_box_at(&mut builder, id, kind, index, 8.0, None);
+        }
+        builder.build(text).calculate_content_widths()
+    }
+
+    let mut fcx = create_font_context();
+    let plain = content_widths(&mut fcx, &[], TextWrapMode::Wrap);
+    let edge_positions = [
+        // <span>x</span> <span>x</span>
+        [
+            (0, InlineBoxKind::InlineStart, 0),
+            (1, InlineBoxKind::InlineEnd, 1),
+            (2, InlineBoxKind::InlineStart, 2),
+            (3, InlineBoxKind::InlineEnd, 3),
+        ],
+        // <span>x </span><span>x</span>
+        [
+            (0, InlineBoxKind::InlineStart, 0),
+            (1, InlineBoxKind::InlineEnd, 2),
+            (2, InlineBoxKind::InlineStart, 2),
+            (3, InlineBoxKind::InlineEnd, 3),
+        ],
+        // <span>x</span><span> x</span>
+        [
+            (0, InlineBoxKind::InlineStart, 0),
+            (1, InlineBoxKind::InlineEnd, 1),
+            (2, InlineBoxKind::InlineStart, 1),
+            (3, InlineBoxKind::InlineEnd, 3),
+        ],
+    ];
+    for edges in edge_positions {
+        let decorated = content_widths(&mut fcx, &edges, TextWrapMode::Wrap);
+        assert_eq!(decorated.min, plain.min + 16.0);
+        assert_eq!(decorated.max, plain.max + 32.0);
+    }
+
+    let nowrap = content_widths(&mut fcx, &edge_positions[0], TextWrapMode::NoWrap);
+    assert_eq!(nowrap.min, nowrap.max);
+    assert_eq!(nowrap.max, plain.max + 32.0);
+}
+
+#[test]
+fn inline_start_moves_past_hanging_whitespace_to_the_next_line() {
+    let text = "x x";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+    let style = builder.push_style_with_white_space_collapse(
+        TextStyle {
+            font_family: FontFamily::from(FONT_FAMILY_LIST),
+            ..TextStyle::default()
+        },
+        WhiteSpaceCollapse::Collapse,
+    );
+    builder.push_style_run(style, ..);
+    for (id, kind, index) in [
+        (0, InlineBoxKind::InlineStart, 0),
+        (1, InlineBoxKind::InlineEnd, 1),
+        (2, InlineBoxKind::InlineStart, 1),
+        (3, InlineBoxKind::InlineEnd, 3),
+    ] {
+        push_test_inline_box_at(&mut builder, id, kind, index, 8.0, None);
+    }
+
+    let mut layout = builder.build(text);
+    let line_width = layout.calculate_content_widths().min;
+    layout.break_all_lines(Some(line_width));
+    let inline_ids = layout
+        .lines()
+        .map(|line| {
+            line.items()
+                .filter_map(|item| match item {
+                    PositionedLayoutItem::InlineBox(inline_box) => Some(inline_box.id),
+                    PositionedLayoutItem::GlyphRun(_) => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(inline_ids, [vec![0, 1], vec![2, 3]]);
+    assert_eq!(
+        layout
+            .lines()
+            .map(|line| line.text_range())
+            .collect::<Vec<_>>(),
+        [0..1, 2..3]
+    );
+    let advances = line_advances(&layout);
+    assert_eq!(advances.len(), 2);
+    assert_eq!(advances[0], advances[1]);
+}
+
+#[test]
+fn justification_excludes_the_full_hanging_whitespace_run() {
+    fn build(fcx: &mut FontContext, text: &str, max_advance: Option<f32>) -> Layout<ColorBrush> {
+        let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+        let mut builder = lcx.style_run_builder(fcx, text, 1.0, false);
+        let style = builder.push_style_with_white_space_collapse(
+            TextStyle {
+                font_family: FontFamily::from(FONT_FAMILY_LIST),
+                ..TextStyle::default()
+            },
+            WhiteSpaceCollapse::Preserve,
+        );
+        builder.push_style_run(style, ..);
+        let mut layout = builder.build(text);
+        layout.break_all_lines(max_advance);
+        layout
+    }
+
+    let mut fcx = create_font_context();
+    let visible_width = build(&mut fcx, "aa aa", None).width();
+    let full_width = build(&mut fcx, "aa aa   ", None).width();
+    let space_width = (full_width - visible_width) / 3.0;
+    let layout = build(
+        &mut fcx,
+        "aa aa   aa",
+        Some(visible_width + 1.5 * space_width),
+    );
+
+    assert_eq!(layout.data.lines.len(), 2);
+    assert_eq!(
+        layout.data.lines[0].break_reason,
+        crate::BreakReason::Regular
+    );
+    assert_eq!(
+        layout.data.lines[0].num_spaces, 1,
+        "only the internal space is a justification opportunity"
+    );
+}
+
+#[test]
+fn justification_opportunities_follow_committed_line_content() {
+    let text = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.ranged_builder(&mut fcx, text, 1.0, false);
+    builder.push_default(FontFamily::from(FONT_FAMILY_LIST));
+    let mut layout = builder.build(text);
+    layout.break_all_lines(Some(150.0));
+    for line in &layout.data.lines {
+        let line_text = &text[line.text_range.clone()];
+        let expected = line_text
+            .trim_end_matches(' ')
+            .bytes()
+            .filter(|byte| *byte == b' ')
+            .count();
+        assert_eq!(
+            line.num_spaces, expected,
+            "justification should count every internal space and exclude trailing white space in {line_text:?}"
+        );
+    }
 }
 
 /// Test that all the builders behave the same when given the same root style.

@@ -120,10 +120,26 @@ impl<B: Brush> StyleRunBuilder<'_, B> {
         &mut self,
         style: TextStyle<'family, 'settings, B>,
     ) -> u16 {
-        let resolved = self
+        self.push_style_with_white_space_collapse(style, WhiteSpaceCollapse::default())
+    }
+
+    /// Adds a fully-specified style with its CSS white-space collapsing mode.
+    ///
+    /// [`StyleRunBuilder`] accepts caller-owned text and does not rewrite it.
+    /// The caller must therefore perform the phase-I text normalization for
+    /// `white-space-collapse` before building the layout. The mode supplied
+    /// here controls the remaining line-breaking, hanging-space, and
+    /// intrinsic-size semantics for this style run.
+    pub fn push_style_with_white_space_collapse<'family, 'settings>(
+        &mut self,
+        style: TextStyle<'family, 'settings, B>,
+        white_space_collapse: WhiteSpaceCollapse,
+    ) -> u16 {
+        let mut resolved = self
             .lcx
             .rcx
             .resolve_entire_style_set(self.fcx, &style, self.scale);
+        resolved.white_space_collapse = white_space_collapse;
         let style_index = self.lcx.style_table.len();
         assert!(style_index <= u16::MAX as usize, "too many styles");
         self.lcx.style_table.push(resolved);
@@ -252,7 +268,6 @@ impl<B: Brush> TreeBuilder<'_, B> {
     ) {
         if inline_box.kind == InlineBoxKind::InFlow {
             self.lcx.tree_style_builder.push_uncommitted_text(false);
-            self.lcx.tree_style_builder.set_is_span_first(false);
             self.lcx
                 .tree_style_builder
                 .set_last_item_kind(ItemKind::InlineBox);
