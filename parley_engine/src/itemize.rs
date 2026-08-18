@@ -239,10 +239,7 @@ fn real_script(script: IcuScript) -> bool {
 /// Convert an ICU script into a [`Script`].
 #[inline]
 fn icu_script_to_parlance_script(script: IcuScript) -> Script {
-    static SHORT_NAMES: icu_properties::PropertyNamesShortBorrowed<'static, IcuScript> =
-        icu_properties::PropertyNamesShort::new();
-
-    SHORT_NAMES
+    icu_properties::PropertyNamesShort::new()
         .get(script)
         .and_then(|name| Script::parse(name).ok())
         .unwrap_or(Script::UNKNOWN)
