@@ -17,7 +17,7 @@ use crate::util::{nearly_eq, nearly_zero};
 use crate::{FontContext, FontData};
 
 use fontique::{self, Query, QueryFamily, QueryFont};
-use parlance::{BidiLevel, GenericFamily, Tag};
+use parlance::{GenericFamily, Tag};
 
 /// If these font features are passed to the shaper, optional ligatures are not applied.
 ///
@@ -67,7 +67,7 @@ pub(crate) fn shape_text<'a, B: Brush>(
             // Push the box to the list of items
             layout
                 .data
-                .push_inline_box(box_idx, BidiLevel::new(0), input.style_after);
+                .push_inline_box(box_idx, analysis.paragraph_level(), input.style_after);
         }
         return;
     }
@@ -206,7 +206,7 @@ pub(crate) fn shape_text<'a, B: Brush>(
         let prev_bidi_level = if shaped_run_idx > 0 {
             layout.data.shaped_text.runs()[&shaped_run_idx - 1].bidi_level
         } else {
-            BidiLevel::new(0)
+            analysis.paragraph_level()
         };
         while let Some((box_idx, input)) = inline_box_iter.peek() {
             if input.inline_box.index <= run_text_byte_start {
@@ -234,15 +234,16 @@ pub(crate) fn shape_text<'a, B: Brush>(
 
     // Process any remaining inline boxes whose index is greater than the length of the text
     //
-    // Give the box the same bidi level as the last text run (or else default to 0 if there is no
-    // text run).
+    // Give the box the same bidi level as the last text run. With no text run,
+    // an object replacement character is neutral and therefore resolves to
+    // the paragraph embedding level.
     let bidi_level = layout
         .data
         .shaped_text
         .runs()
         .last()
         .map(|r| r.bidi_level)
-        .unwrap_or(BidiLevel::new(0));
+        .unwrap_or_else(|| analysis.paragraph_level());
     for (box_idx, input) in inline_box_iter {
         layout
             .data

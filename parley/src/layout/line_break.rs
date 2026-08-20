@@ -1352,6 +1352,10 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             .iter_mut()
             .rev()
         {
+            // Inline boxes carry bidi levels too. An object-only RTL line has
+            // no text run to trigger reordering, but must still apply UAX #9
+            // L2 to its object replacement characters.
+            needs_reorder |= line_item.bidi_level != BidiLevel::new(0);
             match line_item.kind {
                 LayoutItemKind::InlineBox => {
                     let item = &self.layout.data.inline_boxes[line_item.index];
@@ -1369,12 +1373,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     // Q: Can we not simplify this computation by assuming that items are in order?
                     line.text_range.end = line.text_range.end.max(line_item.text_range.end);
                     line.text_range.start = line.text_range.start.min(line_item.text_range.start);
-
-                    // Mark line as needing bidi re-ordering if it contains any runs with non-zero bidi level
-                    // (zero is the default level, so this is equivalent to marking lines that have multiple levels)
-                    if line_item.bidi_level != BidiLevel::new(0) {
-                        needs_reorder = true;
-                    }
 
                     // Compute the run's advance by summing the advances of its constituent clusters
                     line_item.advance = {

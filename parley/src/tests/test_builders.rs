@@ -180,6 +180,36 @@ fn builders_apply_base_direction() {
     );
 }
 
+#[test]
+fn object_only_lines_apply_the_paragraph_bidi_level() {
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, "", 1.0, true);
+    builder.set_base_direction(BaseDirection::Rtl);
+    let style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        ..TextStyle::default()
+    });
+    builder.set_root_style(style);
+    builder.push_style_run(style, 0..0);
+    push_test_inline_box(&mut builder, 0, InlineBoxKind::InFlow, 10.0, None);
+    push_test_inline_box(&mut builder, 1, InlineBoxKind::OutOfFlow, 0.0, None);
+    push_test_inline_box(&mut builder, 2, InlineBoxKind::InFlow, 20.0, None);
+
+    let mut layout = builder.build("");
+    layout.break_all_lines(None);
+    assert!(layout.is_rtl());
+    let boxes = layout
+        .lines()
+        .flat_map(|line| line.items())
+        .filter_map(|item| match item {
+            PositionedLayoutItem::InlineBox(inline_box) => Some((inline_box.id, inline_box.x)),
+            PositionedLayoutItem::GlyphRun(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(boxes, [(2, 0.0), (1, 20.0), (0, 20.0)]);
+}
+
 /// Computes layout in various ways to ensure they all produce the same result.
 ///
 /// ```text
