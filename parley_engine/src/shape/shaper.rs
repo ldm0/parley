@@ -41,6 +41,13 @@ pub struct ShapeOptions<'a> {
 pub struct FontInstance {
     /// The font.
     pub font: FontData,
+    /// Attributes of the selected font face.
+    ///
+    /// These can differ from the requested style attributes when font
+    /// matching selects a nearby face. Keeping them with the instance lets
+    /// renderers make synthesis decisions without reparsing the font or
+    /// repeating font selection.
+    pub attributes: fontique::Attributes,
     /// Font synthesis suggestions.
     // TODO: Synthesis carries more than we need, and ties us to `fontique`. We can likely change
     // this to opaque user data.

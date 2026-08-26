@@ -393,24 +393,11 @@ impl<'a, 'b, B: Brush> parley_engine::FontSelector for FontSelector<'a, 'b, B> {
         });
 
         selected_font
-            .map(|selected_font| selected_font.font)
-            .map(|font| FontInstance {
-                font: FontData {
-                    data: font.blob,
-                    index: font.index,
-                },
-                synthesis: font.synthesis,
-            })
+            .map(|selected_font| font_instance(selected_font.font))
             .or_else(|| {
                 if matches!(self.last_resort_font, LastResortFont::Unresolved) {
                     if let Some(font) = any_font(self.query) {
-                        self.last_resort_font = LastResortFont::Resolved(FontInstance {
-                            font: FontData {
-                                data: font.blob,
-                                index: font.index,
-                            },
-                            synthesis: font.synthesis,
-                        });
+                        self.last_resort_font = LastResortFont::Resolved(font_instance(font));
                     } else {
                         self.last_resort_font = LastResortFont::Unavailable;
                     }
@@ -424,6 +411,17 @@ impl<'a, 'b, B: Brush> parley_engine::FontSelector for FontSelector<'a, 'b, B> {
                     None
                 }
             })
+    }
+}
+
+fn font_instance(font: QueryFont) -> FontInstance {
+    FontInstance {
+        font: FontData {
+            data: font.blob,
+            index: font.index,
+        },
+        attributes: font.attributes,
+        synthesis: font.synthesis,
     }
 }
 

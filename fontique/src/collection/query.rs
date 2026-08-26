@@ -230,6 +230,12 @@ pub struct QueryFont {
     pub blob: Blob<u8>,
     /// Index of a font in a font collection (`ttc`) file.
     pub index: u32,
+    /// Width, style, and weight advertised by the selected face.
+    ///
+    /// These are face attributes, not the attributes requested by the query.
+    /// They are useful to clients that need to decide whether font synthesis
+    /// remains necessary after matching.
+    pub attributes: Attributes,
     /// Synthesis suggestions for this font based on the requested attributes.
     pub synthesis: Synthesis,
     /// Data used for constructing a character map for this font.
@@ -274,6 +280,11 @@ fn load_bucket<'a>(
                     family: (family.id(), index),
                     blob: blob.clone(),
                     index: font_info.index(),
+                    attributes: Attributes::new(
+                        font_info.width(),
+                        font_info.style(),
+                        font_info.weight(),
+                    ),
                     synthesis: font_info.synthesis(
                         attributes.width,
                         attributes.style,
@@ -317,6 +328,11 @@ fn load_font<'a>(
                 family: (family.id(), family_index),
                 blob: blob.clone(),
                 index: blob_index,
+                attributes: Attributes::new(
+                    font_info.width(),
+                    font_info.style(),
+                    font_info.weight(),
+                ),
                 synthesis,
                 charmap_index: font_info.charmap_index(),
             });
@@ -358,4 +374,48 @@ enum Entry<T> {
     Ok(T),
     Vacant,
     Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::sync::Arc;
+
+    use super::*;
+    use crate::{CollectionOptions, FontInfoOverride, FontStyle, FontWeight, FontWidth};
+
+    const ROBOTO: &[u8] =
+        include_bytes!("../../../parley_dev/assets/fonts/roboto_fonts/Roboto-Regular.ttf");
+
+    #[test]
+    fn query_font_reports_selected_face_attributes_separately_from_the_request() {
+        let mut collection = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        });
+        collection.register_fonts(
+            Blob::new(Arc::new(ROBOTO.to_vec())),
+            Some(FontInfoOverride {
+                family_name: Some("QueryFaceAttributes"),
+                width: Some(FontWidth::NORMAL),
+                style: Some(FontStyle::Normal),
+                weight: Some(FontWeight::NORMAL),
+                axes: None,
+            }),
+        );
+
+        let requested =
+            Attributes::new(FontWidth::NORMAL, FontStyle::Normal, FontWeight::new(600.0));
+        let mut source_cache = SourceCache::default();
+        let mut query = collection.query(&mut source_cache);
+        query.set_families([QueryFamily::Named("QueryFaceAttributes")]);
+        query.set_attributes(requested);
+        let mut selected = None;
+        query.matches_with(|font| {
+            selected = Some(font.attributes);
+            QueryStatus::Stop
+        });
+
+        assert_eq!(selected, Some(Attributes::default()));
+        assert_ne!(selected, Some(requested));
+    }
 }

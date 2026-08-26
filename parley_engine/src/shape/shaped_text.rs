@@ -585,6 +585,7 @@ mod tests {
     fn font_instance(font_data: &'static [u8]) -> FontInstance {
         FontInstance {
             font: FontData::new(Blob::new(Arc::new(font_data)), 0),
+            attributes: fontique::Attributes::default(),
             synthesis: Synthesis::default(),
         }
     }
