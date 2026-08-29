@@ -547,8 +547,10 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         lines.lines.clear();
         lines.line_items.clear();
         let mut state = BreakerState::default();
-        state.line.text_wrap_mode =
-            layout.data.styles[usize::from(layout.data.root_style_index)].text_wrap_mode;
+        if !layout.data.items.is_empty() {
+            state.line.text_wrap_mode =
+                layout.data.styles[usize::from(layout.data.root_style_index)].text_wrap_mode;
+        }
         Self {
             layout,
             lines,

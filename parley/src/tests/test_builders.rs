@@ -461,6 +461,19 @@ fn build_white_space_layout(
 }
 
 #[test]
+fn empty_layout_has_zero_content_widths_and_breaks_safely() {
+    let mut layout = Layout::<ColorBrush>::default();
+    let widths = layout.calculate_content_widths();
+
+    assert_eq!(widths.min, 0.0);
+    assert_eq!(widths.max, 0.0);
+    layout.break_all_lines(None);
+    assert_eq!(layout.width(), 0.0);
+    assert_eq!(layout.full_width(), 0.0);
+    assert_eq!(layout.height(), 0.0);
+}
+
+#[test]
 fn style_runs_apply_white_space_collapse_to_intrinsic_sizes() {
     let mut fcx = create_font_context();
     let collapse = build_white_space_layout(

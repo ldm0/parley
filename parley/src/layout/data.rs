@@ -368,6 +368,12 @@ impl<B: Brush> LayoutData<B> {
     // TODO: this method does not handle mixed direction text at all.
     #[expect(clippy::cast_possible_truncation, reason = "deferred")]
     pub(crate) fn calculate_content_widths(&self) -> ContentWidths {
+        // `Layout::default()` is a valid empty layout. It has no root style,
+        // and no content can contribute an intrinsic width.
+        if self.items.is_empty() {
+            return ContentWidths { min: 0.0, max: 0.0 };
+        }
+
         let end_of_line = |character: &parley_engine::shape::Character| {
             let style = &self.styles[character.style_index as usize];
             style
