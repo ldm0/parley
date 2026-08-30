@@ -1156,6 +1156,53 @@ fn inline_style_boundaries_keep_atomic_decorations_together() {
     assert_eq!(line_advances(&layout), [80.0, 64.0]);
 }
 
+#[test]
+fn forced_break_separates_atomic_inline_content_widths() {
+    let text = "\n";
+    let mut fcx = FontContext::new();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    // Browser layout inserts a newline for `<br>` after CSS whitespace
+    // normalization, so it remains a hard break even under `collapse`.
+    let style = builder.push_style(TextStyle::default());
+    builder.set_root_style(style);
+    builder.push_style_run(style, ..);
+    push_test_inline_box_at(&mut builder, 0, InlineBoxKind::InFlow, 0, 20.0, None);
+    push_test_inline_box_at(&mut builder, 1, InlineBoxKind::InFlow, 1, 30.0, None);
+
+    let mut layout = builder.build(text);
+    assert_eq!(layout.calculate_content_widths().min, 30.0);
+    assert_eq!(layout.calculate_content_widths().max, 30.0);
+
+    layout.break_all_lines(None);
+    assert_eq!(line_advances(&layout), [20.0, 30.0]);
+}
+
+#[test]
+fn forced_break_boundary_does_not_split_following_inline_content() {
+    let text = "\nx";
+    let mut fcx = create_font_context();
+    let mut lcx: LayoutContext<ColorBrush> = LayoutContext::new();
+    let mut builder = lcx.style_run_builder(&mut fcx, text, 1.0, false);
+
+    let style = builder.push_style(TextStyle {
+        font_family: FontFamily::from(FONT_FAMILY_LIST),
+        ..TextStyle::default()
+    });
+    builder.set_root_style(style);
+    builder.push_style_run(style, ..);
+    push_test_inline_box_at(&mut builder, 0, InlineBoxKind::InFlow, 1, 30.0, None);
+
+    let mut layout = builder.build(text);
+    let max_content = layout.calculate_content_widths().max;
+    layout.break_all_lines(None);
+    let advances = line_advances(&layout);
+
+    assert_eq!(advances.len(), 2);
+    assert!((max_content - advances[1]).abs() < 0.01);
+}
+
 /// A descendant can re-enable wrapping inside a nowrap root, while its close
 /// item restores the root style for following atomic content.
 #[test]

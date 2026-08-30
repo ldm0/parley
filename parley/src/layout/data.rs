@@ -414,10 +414,9 @@ impl<B: Brush> LayoutData<B> {
                         let style = &self.styles[character.style_index as usize];
                         let prev_text_wrap_mode = text_wrap_mode;
                         text_wrap_mode = style.text_wrap_mode;
-                        if boundary == Boundary::Mandatory
-                            || (prev_text_wrap_mode == TextWrapMode::Wrap
-                                && (boundary == Boundary::Line
-                                    || style.overflow_wrap == OverflowWrap::Anywhere))
+                        if prev_text_wrap_mode == TextWrapMode::Wrap
+                            && (boundary == Boundary::Line
+                                || style.overflow_wrap == OverflowWrap::Anywhere)
                         {
                             min_width = min_width.max(
                                 running_min_width
@@ -426,12 +425,6 @@ impl<B: Brush> LayoutData<B> {
                             );
                             running_min_width = pending_inline_start_width;
                             min_trailing_whitespace = 0.0;
-                            if boundary == Boundary::Mandatory {
-                                max_width =
-                                    max_width.max(running_max_width - max_trailing_whitespace);
-                                running_max_width = 0.0;
-                                max_trailing_whitespace = 0.0;
-                            }
                         }
                         let advance = atom.advance();
                         running_min_width += advance;
@@ -486,6 +479,21 @@ impl<B: Brush> LayoutData<B> {
                             pending_inline_start_width = 0.0;
                         }
                         last_content_text_wrap_mode = Some(style.text_wrap_mode);
+
+                        // Unicode line-break analysis stores the mandatory boundary on the
+                        // character following a segment break. That character may be separated
+                        // from the newline by an inline-box item, or may not exist at all for a
+                        // trailing newline. The line breaker consumes the newline itself, so
+                        // intrinsic widths must end the measure at the same atom.
+                        if whitespace == Whitespace::Newline {
+                            min_width = min_width.max(running_min_width - min_trailing_whitespace);
+                            running_min_width = 0.0;
+                            min_trailing_whitespace = 0.0;
+                            max_width = max_width.max(running_max_width - max_trailing_whitespace);
+                            running_max_width = 0.0;
+                            max_trailing_whitespace = 0.0;
+                            break_after_pending = false;
+                        }
                     }
                     min_width = min_width.max(running_min_width - min_trailing_whitespace);
                 }
