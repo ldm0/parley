@@ -611,10 +611,9 @@ impl<B: Brush> LayoutData<B> {
                         let style = &self.styles[cluster.style_index as usize];
                         let prev_text_wrap_mode = text_wrap_mode;
                         text_wrap_mode = style.text_wrap_mode;
-                        if boundary == Boundary::Mandatory
-                            || (prev_text_wrap_mode == TextWrapMode::Wrap
-                                && (boundary == Boundary::Line
-                                    || style.overflow_wrap == OverflowWrap::Anywhere))
+                        if prev_text_wrap_mode == TextWrapMode::Wrap
+                            && (boundary == Boundary::Line
+                                || style.overflow_wrap == OverflowWrap::Anywhere)
                         {
                             let trailing_whitespace = whitespace_advance(prev_cluster);
                             min_width = min_width.max(
@@ -623,16 +622,28 @@ impl<B: Brush> LayoutData<B> {
                                     - trailing_whitespace,
                             );
                             running_min_width = pending_inline_start_width;
-                            if boundary == Boundary::Mandatory {
-                                max_width = max_width.max(running_max_width - trailing_whitespace);
-                                running_max_width = 0.0;
-                            }
                         }
                         running_min_width += cluster.advance;
                         running_max_width += cluster.advance;
                         pending_inline_start_width = 0.0;
                         last_content_text_wrap_mode = Some(style.text_wrap_mode);
-                        if !is_rtl {
+
+                        // Unicode line-break analysis attaches a mandatory boundary to the
+                        // character after a segment break. An inline box can sit between those
+                        // two characters, and a trailing newline has no following character at
+                        // all. The line breaker consumes the newline itself, so intrinsic
+                        // measurement must finish the same line at the newline cluster rather
+                        // than waiting for a later boundary.
+                        if cluster.info.whitespace() == Whitespace::Newline {
+                            let trailing_whitespace = whitespace_advance(prev_cluster);
+                            min_width = min_width.max(running_min_width - trailing_whitespace);
+                            max_width = max_width.max(running_max_width - trailing_whitespace);
+                            running_min_width = 0.0;
+                            running_max_width = 0.0;
+                            pending_inline_start_width = 0.0;
+                            break_after_pending = false;
+                            prev_cluster = None;
+                        } else if !is_rtl {
                             prev_cluster = Some(cluster);
                         }
                     }
