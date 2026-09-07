@@ -182,6 +182,16 @@ pub struct PositionedInlineBox {
     pub height: f32,
     pub id: u64,
     pub kind: InlineBoxKind,
+    bidi_level: u8,
+}
+
+impl PositionedInlineBox {
+    /// Whether this item's resolved direction is right-to-left.
+    ///
+    /// This can differ from the paragraph direction in mixed-direction text.
+    pub fn is_rtl(&self) -> bool {
+        self.bidi_level & 1 != 0
+    }
 }
 
 /// Sequence of fully positioned glyphs with the same style.
@@ -264,6 +274,9 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                         + self.line.data.metrics.inline_min_coord
                         + self.line.data.metrics.offset;
 
+                    let bidi_level = self.line.layout.data.line_items
+                        [self.line.data.item_range.start + self.item_index]
+                        .bidi_level;
                     self.item_index += 1;
                     self.glyph_start = 0;
                     if inline_box.kind == InlineBoxKind::InFlow {
@@ -276,6 +289,7 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                         height: inline_box.height,
                         id: inline_box.id,
                         kind: inline_box.kind,
+                        bidi_level,
                     }));
                 }
                 LineItem::Run(run) => {

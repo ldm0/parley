@@ -12,27 +12,44 @@ use super::layout::Layout;
 use alloc::string::String;
 use core::ops::{Bound, Range, RangeBounds};
 
-use crate::InlineBoxKind;
 use crate::break_overrides::LineBreakOverrideFn;
-use crate::inline_box::InlineBox;
+use crate::inline_box::{InlineBox, InlineBoxInput};
 use crate::resolve::{ResolvedStyle, StyleRun, tree::ItemKind};
+use crate::{BaseDirection, InlineBoxBidi, InlineBoxKind};
+
+#[derive(Clone, Copy)]
+pub(crate) struct BuilderOptions<'a> {
+    scale: f32,
+    quantize: bool,
+    base_direction: BaseDirection,
+    line_break_override: Option<&'a LineBreakOverrideFn>,
+}
+
+impl BuilderOptions<'_> {
+    pub(crate) fn new(scale: f32, quantize: bool) -> Self {
+        Self {
+            scale,
+            quantize,
+            base_direction: BaseDirection::Auto,
+            line_break_override: None,
+        }
+    }
+}
 
 /// Builder for constructing a text layout with ranged attributes.
 #[must_use]
 pub struct RangedBuilder<'a, B: Brush> {
-    pub(crate) scale: f32,
-    pub(crate) quantize: bool,
+    pub(crate) options: BuilderOptions<'a>,
     pub(crate) lcx: &'a mut LayoutContext<B>,
     pub(crate) fcx: &'a mut FontContext,
-    pub(crate) line_break_override: Option<&'a LineBreakOverrideFn>,
 }
 
 impl<'b, B: Brush> RangedBuilder<'b, B> {
     pub fn push_default<'a>(&mut self, property: impl Into<StyleProperty<'a, B>>) {
-        let resolved = self
-            .lcx
-            .rcx
-            .resolve_property(self.fcx, &property.into(), self.scale);
+        let resolved =
+            self.lcx
+                .rcx
+                .resolve_property(self.fcx, &property.into(), self.options.scale);
         self.lcx.ranged_style_builder.push_default(resolved);
     }
 
@@ -41,22 +58,36 @@ impl<'b, B: Brush> RangedBuilder<'b, B> {
         property: impl Into<StyleProperty<'a, B>>,
         range: impl RangeBounds<usize>,
     ) {
-        let resolved = self
-            .lcx
-            .rcx
-            .resolve_property(self.fcx, &property.into(), self.scale);
+        let resolved =
+            self.lcx
+                .rcx
+                .resolve_property(self.fcx, &property.into(), self.options.scale);
         self.lcx.ranged_style_builder.push(resolved, range);
     }
 
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.lcx.inline_boxes.push(inline_box);
+        self.push_inline_box_with_bidi(inline_box, InlineBoxBidi::Neutral);
+    }
+
+    /// Adds an inline item with explicit bidi participation.
+    pub fn push_inline_box_with_bidi(&mut self, inline_box: InlineBox, bidi: InlineBoxBidi) {
+        self.lcx
+            .inline_boxes
+            .push(InlineBoxInput::new(inline_box, bidi));
+    }
+
+    /// Sets the paragraph's base direction.
+    ///
+    /// The default is [`BaseDirection::Auto`], which infers direction from the text.
+    pub fn set_base_direction(&mut self, base_direction: BaseDirection) {
+        self.options.base_direction = base_direction;
     }
 
     /// Set the callback which will be called as a first provider of line breaking decisions.
     ///
     /// See [`LineBreakOverrideFn`] for more details.
     pub fn set_line_break_override(&mut self, overrides: Option<&'b LineBreakOverrideFn>) {
-        self.line_break_override = overrides;
+        self.options.line_break_override = overrides;
     }
 
     pub fn build_into(self, layout: &mut Layout<B>, text: impl AsRef<str>) {
@@ -66,15 +97,7 @@ impl<'b, B: Brush> RangedBuilder<'b, B> {
             .finish(&mut self.lcx.style_table, &mut self.lcx.style_runs);
 
         // Call generic layout builder method
-        build_into_layout(
-            layout,
-            self.scale,
-            self.quantize,
-            text.as_ref(),
-            self.lcx,
-            self.fcx,
-            self.line_break_override,
-        );
+        build_into_layout(layout, text.as_ref(), self.lcx, self.fcx, self.options);
     }
 
     pub fn build(self, text: impl AsRef<str>) -> Layout<B> {
@@ -88,13 +111,11 @@ impl<'b, B: Brush> RangedBuilder<'b, B> {
 /// indexed style runs.
 #[must_use]
 pub struct StyleRunBuilder<'a, B: Brush> {
-    pub(crate) scale: f32,
-    pub(crate) quantize: bool,
+    pub(crate) options: BuilderOptions<'a>,
     pub(crate) len: usize,
     pub(crate) lcx: &'a mut LayoutContext<B>,
     pub(crate) fcx: &'a mut FontContext,
     pub(crate) cursor: usize,
-    pub(crate) line_break_override: Option<&'a LineBreakOverrideFn>,
 }
 
 impl<'b, B: Brush> StyleRunBuilder<'b, B> {
@@ -117,7 +138,7 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
         let resolved = self
             .lcx
             .rcx
-            .resolve_entire_style_set(self.fcx, &style, self.scale);
+            .resolve_entire_style_set(self.fcx, &style, self.options.scale);
         let style_index = self.lcx.style_table.len();
         assert!(style_index <= u16::MAX as usize, "too many styles");
         self.lcx.style_table.push(resolved);
@@ -150,14 +171,28 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
     }
 
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.lcx.inline_boxes.push(inline_box);
+        self.push_inline_box_with_bidi(inline_box, InlineBoxBidi::Neutral);
+    }
+
+    /// Adds an inline item with explicit bidi participation.
+    pub fn push_inline_box_with_bidi(&mut self, inline_box: InlineBox, bidi: InlineBoxBidi) {
+        self.lcx
+            .inline_boxes
+            .push(InlineBoxInput::new(inline_box, bidi));
+    }
+
+    /// Sets the paragraph's base direction.
+    ///
+    /// The default is [`BaseDirection::Auto`], which infers direction from the text.
+    pub fn set_base_direction(&mut self, base_direction: BaseDirection) {
+        self.options.base_direction = base_direction;
     }
 
     /// Set the callback which will be called as a first provider of line breaking decisions.
     ///
     /// See [`LineBreakOverrideFn`] for more details.
     pub fn set_line_break_override(&mut self, overrides: Option<&'b LineBreakOverrideFn>) {
-        self.line_break_override = overrides;
+        self.options.line_break_override = overrides;
     }
 
     pub fn build_into(self, layout: &mut Layout<B>, text: impl AsRef<str>) {
@@ -165,15 +200,7 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
             self.cursor == self.len,
             "StyleRunBuilder requires runs that cover the full text"
         );
-        build_into_layout(
-            layout,
-            self.scale,
-            self.quantize,
-            text.as_ref(),
-            self.lcx,
-            self.fcx,
-            self.line_break_override,
-        );
+        build_into_layout(layout, text.as_ref(), self.lcx, self.fcx, self.options);
     }
 
     pub fn build(self, text: impl AsRef<str>) -> Layout<B> {
@@ -186,11 +213,9 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
 /// Builder for constructing a text layout with a tree of attributes.
 #[must_use]
 pub struct TreeBuilder<'a, B: Brush> {
-    pub(crate) scale: f32,
-    pub(crate) quantize: bool,
+    pub(crate) options: BuilderOptions<'a>,
     pub(crate) lcx: &'a mut LayoutContext<B>,
     pub(crate) fcx: &'a mut FontContext,
-    pub(crate) line_break_override: Option<&'a LineBreakOverrideFn>,
 }
 
 impl<'b, B: Brush> TreeBuilder<'b, B> {
@@ -198,7 +223,7 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
         let resolved = self
             .lcx
             .rcx
-            .resolve_entire_style_set(self.fcx, &style, self.scale);
+            .resolve_entire_style_set(self.fcx, &style, self.options.scale);
         self.lcx.tree_style_builder.push_style_span(resolved);
     }
 
@@ -209,11 +234,13 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
         's: 'iter,
         B: 'iter,
     {
-        self.lcx.tree_style_builder.push_style_modification_span(
-            properties
-                .into_iter()
-                .map(|p| self.lcx.rcx.resolve_property(self.fcx, p, self.scale)),
-        );
+        self.lcx
+            .tree_style_builder
+            .push_style_modification_span(properties.into_iter().map(|p| {
+                self.lcx
+                    .rcx
+                    .resolve_property(self.fcx, p, self.options.scale)
+            }));
     }
 
     pub fn pop_style_span(&mut self) {
@@ -224,7 +251,12 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
         self.lcx.tree_style_builder.push_text(text);
     }
 
-    pub fn push_inline_box(&mut self, mut inline_box: InlineBox) {
+    pub fn push_inline_box(&mut self, inline_box: InlineBox) {
+        self.push_inline_box_with_bidi(inline_box, InlineBoxBidi::Neutral);
+    }
+
+    /// Adds an inline item with explicit bidi participation.
+    pub fn push_inline_box_with_bidi(&mut self, mut inline_box: InlineBox, bidi: InlineBoxBidi) {
         if inline_box.kind == InlineBoxKind::InFlow {
             self.lcx.tree_style_builder.push_uncommitted_text(false);
             self.lcx.tree_style_builder.set_is_span_first(false);
@@ -235,7 +267,9 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
 
         // TODO: arrange type better here to factor out the index
         inline_box.index = self.lcx.tree_style_builder.current_text_len();
-        self.lcx.inline_boxes.push(inline_box);
+        self.lcx
+            .inline_boxes
+            .push(InlineBoxInput::new(inline_box, bidi));
     }
 
     pub fn set_white_space_mode(&mut self, white_space_collapse: WhiteSpaceCollapse) {
@@ -244,11 +278,18 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
             .set_white_space_mode(white_space_collapse);
     }
 
+    /// Sets the paragraph's base direction.
+    ///
+    /// The default is [`BaseDirection::Auto`], which infers direction from the text.
+    pub fn set_base_direction(&mut self, base_direction: BaseDirection) {
+        self.options.base_direction = base_direction;
+    }
+
     /// Set the callback which will be called as a first provider of line breaking decisions.
     ///
     /// See [`LineBreakOverrideFn`] for more details.
     pub fn set_line_break_override(&mut self, overrides: Option<&'b LineBreakOverrideFn>) {
-        self.line_break_override = overrides;
+        self.options.line_break_override = overrides;
     }
 
     #[inline]
@@ -260,15 +301,7 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
             .finish(&mut self.lcx.style_table, &mut self.lcx.style_runs);
 
         // Call generic layout builder method
-        build_into_layout(
-            layout,
-            self.scale,
-            self.quantize,
-            &text,
-            self.lcx,
-            self.fcx,
-            self.line_break_override,
-        );
+        build_into_layout(layout, &text, self.lcx, self.fcx, self.options);
 
         text
     }
@@ -283,12 +316,10 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
 
 fn build_into_layout<B: Brush>(
     layout: &mut Layout<B>,
-    scale: f32,
-    quantize: bool,
     text: &str,
     lcx: &mut LayoutContext<B>,
     fcx: &mut FontContext,
-    line_break_override: Option<&LineBreakOverrideFn>,
+    options: BuilderOptions<'_>,
 ) {
     if text.is_empty() && lcx.style_runs.is_empty() {
         lcx.style_table.push(ResolvedStyle::default());
@@ -302,11 +333,18 @@ fn build_into_layout<B: Brush>(
         "at least one style run is required"
     );
 
-    crate::analysis::analyze_text(lcx, text, line_break_override);
+    // Keep equal-index items in insertion order, including transparent boundaries.
+    lcx.inline_boxes.sort_by_key(|b| b.inline_box.index);
+    crate::analysis::analyze_text(
+        lcx,
+        text,
+        options.line_break_override,
+        options.base_direction,
+    );
 
     layout.data.clear();
-    layout.data.scale = scale;
-    layout.data.quantize = quantize;
+    layout.data.scale = options.scale;
+    layout.data.quantize = options.quantize;
     layout.data.base_level = lcx.bidi.base_level();
     layout.data.text_len = text.len();
 
@@ -324,10 +362,6 @@ fn build_into_layout<B: Brush>(
         .styles
         .extend(lcx.style_table.iter().map(|s| s.as_layout_style()));
 
-    // Sort the inline boxes as subsequent code assumes that they are in text index order.
-    // Note: It's important that this is a stable sort to allow users to control the order of contiguous inline boxes
-    lcx.inline_boxes.sort_by_key(|b| b.index);
-
     {
         let query = fcx.collection.query(&mut fcx.source_cache);
         super::shape::shape_text(
@@ -336,7 +370,6 @@ fn build_into_layout<B: Brush>(
             &lcx.style_table,
             &lcx.inline_boxes,
             &lcx.info,
-            lcx.bidi.levels(),
             &mut lcx.scx,
             text,
             layout,
@@ -346,7 +379,10 @@ fn build_into_layout<B: Brush>(
 
     // Move inline boxes into the layout
     layout.data.inline_boxes.clear();
-    core::mem::swap(&mut layout.data.inline_boxes, &mut lcx.inline_boxes);
+    layout
+        .data
+        .inline_boxes
+        .extend(lcx.inline_boxes.drain(..).map(|input| input.inline_box));
 
     layout.data.finish();
 }

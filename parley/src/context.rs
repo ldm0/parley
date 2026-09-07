@@ -13,8 +13,8 @@ use super::style::{Brush, TextStyle};
 
 use crate::analysis::{AnalysisDataSources, CharInfo};
 use crate::bidi::BidiResolver;
-use crate::builder::TreeBuilder;
-use crate::inline_box::InlineBox;
+use crate::builder::{BuilderOptions, TreeBuilder};
+use crate::inline_box::InlineBoxInput;
 use crate::shape::ShapeContext;
 
 /// Shared scratch space used when constructing text layouts.
@@ -24,7 +24,7 @@ pub struct LayoutContext<B: Brush = [u8; 4]> {
     pub(crate) rcx: ResolveContext,
     pub(crate) style_table: Vec<ResolvedStyle<B>>,
     pub(crate) style_runs: Vec<StyleRun>,
-    pub(crate) inline_boxes: Vec<InlineBox>,
+    pub(crate) inline_boxes: Vec<InlineBoxInput>,
     pub(crate) bidi: BidiResolver,
 
     // Reusable style builders (to amortise allocations)
@@ -100,11 +100,9 @@ impl<B: Brush> LayoutContext<B> {
         fcx.source_cache.prune(128, false);
 
         RangedBuilder {
-            scale,
-            quantize,
+            options: BuilderOptions::new(scale, quantize),
             lcx: self,
             fcx,
-            line_break_override: None,
         }
     }
 
@@ -128,13 +126,11 @@ impl<B: Brush> LayoutContext<B> {
         fcx.source_cache.prune(128, false);
 
         StyleRunBuilder {
-            scale,
-            quantize,
+            options: BuilderOptions::new(scale, quantize),
             len: text.len(),
             lcx: self,
             fcx,
             cursor: 0,
-            line_break_override: None,
         }
     }
 
@@ -172,11 +168,9 @@ impl<B: Brush> LayoutContext<B> {
         fcx.source_cache.prune(128, false);
 
         TreeBuilder {
-            scale,
-            quantize,
+            options: BuilderOptions::new(scale, quantize),
             lcx: self,
             fcx,
-            line_break_override: None,
         }
     }
 

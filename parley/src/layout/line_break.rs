@@ -921,6 +921,9 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             .iter_mut()
             .rev()
         {
+            // Objects carry resolved levels too, including on lines with no
+            // text runs. UAX #9 L2 applies to the complete line item sequence.
+            needs_reorder |= line_item.bidi_level != 0;
             match line_item.kind {
                 LayoutItemKind::InlineBox => {
                     let item = &self.layout.data.inline_boxes[line_item.index];
@@ -942,12 +945,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     // Q: Can we not simplify this computation by assuming that items are in order?
                     line.text_range.end = line.text_range.end.max(line_item.text_range.end);
                     line.text_range.start = line.text_range.start.min(line_item.text_range.start);
-
-                    // Mark line as needing bidi re-ordering if it contains any runs with non-zero bidi level
-                    // (zero is the default level, so this is equivalent to marking lines that have multiple levels)
-                    if line_item.bidi_level != 0 {
-                        needs_reorder = true;
-                    }
 
                     // Compute the run's advance by summing the advances of its constituent clusters
                     line_item.advance = self.layout.data.clusters[line_item.cluster_range.clone()]

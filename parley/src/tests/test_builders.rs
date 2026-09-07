@@ -3,7 +3,7 @@
 
 //! Test that the various builders produce the same results.
 
-use std::{borrow::Cow, path::PathBuf, sync::Arc};
+use std::{borrow::Cow, path::PathBuf, sync::Arc, vec, vec::Vec};
 
 use fontique::{Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, SourceCache};
 use parlance::FontFamilyName;
@@ -24,6 +24,59 @@ const FONT_FAMILY_LIST: &[FontFamilyName<'_>] = &[
     FontFamilyName::Named(Cow::Borrowed("Roboto")),
     FontFamilyName::Named(Cow::Borrowed("Noto Kufi Arabic")),
 ];
+
+#[test]
+fn builders_keep_explicit_direction_local_to_each_layout() {
+    use crate::{BaseDirection, InlineBox, InlineBoxKind, PositionedLayoutItem};
+
+    let mut fcx = create_font_context();
+    let mut lcx = LayoutContext::<ColorBrush>::new();
+    for direction in [BaseDirection::Rtl, BaseDirection::Ltr, BaseDirection::Auto] {
+        let mut ranged = lcx.ranged_builder(&mut fcx, "", 1.0, false);
+        ranged.set_base_direction(direction);
+        for id in 0..3 {
+            ranged.push_inline_box(InlineBox {
+                id,
+                kind: InlineBoxKind::InFlow,
+                index: 0,
+                width: 10.0,
+                height: 10.0,
+            });
+        }
+        let mut layout = ranged.build("");
+        layout.break_all_lines(None);
+        let rtl = direction == BaseDirection::Rtl;
+        assert_eq!(layout.is_rtl(), rtl);
+        let boxes = layout
+            .lines()
+            .flat_map(|line| line.items())
+            .filter_map(|item| match item {
+                PositionedLayoutItem::InlineBox(item) => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            boxes.iter().map(|item| item.id).collect::<Vec<_>>(),
+            if rtl { vec![2, 1, 0] } else { vec![0, 1, 2] }
+        );
+        assert!(boxes.iter().all(|item| item.is_rtl() == rtl));
+
+        let mut indexed = lcx.style_run_builder(&mut fcx, "", 1.0, false);
+        indexed.set_base_direction(direction);
+        assert_eq!(indexed.build("").is_rtl(), rtl);
+
+        let mut tree = lcx.tree_builder(&mut fcx, 1.0, false, &TextStyle::default());
+        tree.set_base_direction(direction);
+        assert_eq!(tree.build().0.is_rtl(), rtl);
+
+        // No direction or embedding state leaks into a subsequent default build.
+        assert!(
+            !lcx.ranged_builder(&mut fcx, "abc", 1.0, false)
+                .build("abc")
+                .is_rtl()
+        );
+    }
+}
 
 pub(crate) fn load_fonts(
     collection: &mut Collection,

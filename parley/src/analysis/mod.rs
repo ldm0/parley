@@ -1,6 +1,7 @@
 // Copyright 2025 the Parley Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+mod bidi;
 pub(crate) mod cluster;
 
 use alloc::vec::Vec;
@@ -8,7 +9,7 @@ use core::marker::PhantomData;
 
 use crate::break_overrides::{LineBreakContext, LineBreakOverrideFn};
 use crate::resolve::StyleRun;
-use crate::{Brush, LayoutContext, WordBreak};
+use crate::{BaseDirection, Brush, LayoutContext, WordBreak};
 
 use icu_normalizer::properties::{
     CanonicalComposition, CanonicalCompositionBorrowed, CanonicalDecomposition,
@@ -121,6 +122,7 @@ pub(crate) struct CharInfo {
     /// Whether or not the character is a bracket, plus mirror data if so.
     pub bracket: BidiMirroringGlyph,
 
+    pub(crate) bidi_level: u8,
     flags: u8,
 }
 
@@ -166,6 +168,7 @@ impl CharInfo {
             grapheme_cluster_break,
             bidi_class,
             bracket,
+            bidi_level: 0,
             flags: (is_variation_selector as u8) << Self::VARIATION_SELECTOR_SHIFT
                 | (is_region_indicator as u8) << Self::REGION_INDICATOR_SHIFT
                 | (is_control as u8) << Self::CONTROL_SHIFT
@@ -232,6 +235,7 @@ pub(crate) fn analyze_text<B: Brush>(
     lcx: &mut LayoutContext<B>,
     mut text: &str,
     line_break_override: Option<&LineBreakOverrideFn>,
+    base_direction: BaseDirection,
 ) {
     struct WordBreakSegmentIter<'a, I: Iterator, B: Brush> {
         text: &'a str,
@@ -535,15 +539,8 @@ pub(crate) fn analyze_text<B: Brush>(
             next_mandatory_linebreak
         });
 
-    if needs_bidi_resolution {
-        lcx.bidi.resolve(
-            text.chars().zip(
-                lcx.info
-                    .iter()
-                    .map(|info| (info.0.bidi_class, info.0.bracket)),
-            ),
-            None,
-        );
+    if needs_bidi_resolution || base_direction == BaseDirection::Rtl {
+        bidi::resolve(lcx, text, base_direction);
     }
 }
 

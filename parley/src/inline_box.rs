@@ -38,3 +38,35 @@ pub enum InlineBoxKind {
     /// They can be used to implement advanced layout modes such as CSS's `float`
     CustomOutOfFlow,
 }
+
+/// How an inline item participates in Unicode bidirectional analysis.
+///
+/// This is independent of whether the item occupies space in line layout.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InlineBoxBidi {
+    /// A neutral object, analyzed as U+FFFC OBJECT REPLACEMENT CHARACTER.
+    #[default]
+    Neutral,
+    /// A transparent opening boundary, following the next content's level.
+    StartBoundary,
+    /// A transparent closing boundary, following the preceding content's level.
+    EndBoundary,
+}
+
+/// Builder input and its resolved embedding level. Boundary items are not
+/// inserted into the text used for shaping, breaking, or bidi analysis.
+pub(crate) struct InlineBoxInput {
+    pub(crate) inline_box: InlineBox,
+    pub(crate) bidi: InlineBoxBidi,
+    pub(crate) bidi_level: u8,
+}
+
+impl InlineBoxInput {
+    pub(crate) fn new(inline_box: InlineBox, bidi: InlineBoxBidi) -> Self {
+        Self {
+            inline_box,
+            bidi,
+            bidi_level: 0,
+        }
+    }
+}
