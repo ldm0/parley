@@ -151,7 +151,13 @@ impl<'a, B: Brush> Cluster<'a, B> {
     /// Returns the first style that applies to the cluster. If the cluster contains multiple glyphs
     /// then this style may not apply to all glyphs in the cluster (see the `DIVERGENT_STYLES` flag)
     pub fn first_style(&self) -> &Style<B> {
-        &self.run.layout.styles()[usize::from(self.data.style_index)]
+        &self.run.layout.styles()[self.first_style_index()]
+    }
+
+    /// Index of the first style in the layout's style array. Unlike glyph
+    /// iteration, this remains available for collapsed or glyphless clusters.
+    pub fn first_style_index(&self) -> usize {
+        usize::from(self.data.style_index)
     }
 
     /// Returns the advance of the cluster.

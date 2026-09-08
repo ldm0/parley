@@ -48,6 +48,10 @@ fn collapsed_trailing_spaces_have_source_positions_but_no_advance_or_glyphs() {
         assert_eq!(space.text_range(), 2..3);
         assert_eq!(space.advance(), 0.0);
         assert_eq!(space.glyphs().count(), 0);
+        assert!(core::ptr::eq(
+            space.first_style(),
+            &actual.styles()[space.first_style_index()]
+        ));
         assert_eq!(space.previous_logical().unwrap().text_range(), 1..2);
         assert_eq!(space.next_logical().unwrap().text_range(), 3..4);
     }
