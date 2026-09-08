@@ -126,6 +126,15 @@ pub struct BoxBreakData {
     pub inline_box_index: usize,
     /// The current advance of the line (up to but *not* including the `CustomOutOfFlow` box)
     pub advance: f32,
+    /// Advance to use when deciding whether the custom box fits beside the
+    /// current line. Includes indentation and immediately following closing
+    /// inline edges, but excludes trailing collapsible whitespace. This is a
+    /// fit query only: it does not collapse the in-progress line's text.
+    pub fit_advance: f32,
+    /// No in-flow content or nonzero inline edge precedes this box on the line.
+    /// A caller can use this to distinguish leading floats from floats whose
+    /// placement depends on an already-started line.
+    pub is_line_start: bool,
 }
 
 #[derive(Clone)]
@@ -428,6 +437,68 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         &mut self.state
     }
 
+    fn trailing_collapsible_advance(&self) -> f32 {
+        // Leading collapsed spaces have already been excluded from line.x.
+        if !self.state.line.has_in_flow_content {
+            return 0.0;
+        }
+        let data = &self.layout.data;
+        let mut advance = 0.0;
+        for item in data.items[self.state.line.items.start..self.state.item_idx]
+            .iter()
+            .rev()
+        {
+            match item.kind {
+                LayoutItemKind::InlineBox => {
+                    if data.inline_boxes[item.index].kind == InlineBoxKind::InFlow {
+                        break;
+                    }
+                }
+                LayoutItemKind::TextRun => {
+                    let range = &data.runs[item.index].cluster_range;
+                    let start = range.start.max(self.state.line.clusters.start);
+                    let end = range.end.min(self.state.cluster_idx);
+                    if start >= end {
+                        continue;
+                    }
+                    for cluster in data.clusters[start..end].iter().rev() {
+                        match edge_whitespace(data, cluster) {
+                            EdgeWhitespace::Collapsible => advance += cluster.advance,
+                            EdgeWhitespace::Transparent => {}
+                            EdgeWhitespace::Content => return advance,
+                        }
+                    }
+                }
+            }
+        }
+        advance
+    }
+
+    fn following_inline_end_advance(&self) -> f32 {
+        let data = &self.layout.data;
+        let mut advance = 0.0;
+        for item in &data.items[self.state.item_idx + 1..] {
+            match item.kind {
+                LayoutItemKind::InlineBox => {
+                    let inline_box = &data.inline_boxes[item.index];
+                    match inline_box.kind {
+                        InlineBoxKind::EndBoundary => advance += inline_box.width,
+                        // Even an empty opening inline terminates the sequence
+                        // of ancestor closing edges attached to this float.
+                        InlineBoxKind::StartBoundary | InlineBoxKind::InFlow => break,
+                        _ => {}
+                    }
+                }
+                LayoutItemKind::TextRun => {
+                    if !data.runs[item.index].text_range.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        advance
+    }
+
     /// Set the max-advance of the previous line.
     ///
     /// This is an escape-hatch for allowing a custom width for
@@ -577,6 +648,11 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 inline_box_id: inline_box.id,
                                 inline_box_index: item.index,
                                 advance: self.state.line.x,
+                                fit_advance: self.state.line.x + line_indent
+                                    - self.trailing_collapsible_advance()
+                                    + self.following_inline_end_advance(),
+                                is_line_start: !self.state.line.has_in_flow_content
+                                    && self.state.line.x == 0.0,
                             }));
                         }
                     };
@@ -1301,20 +1377,7 @@ fn collapse_line_edge_whitespace<B: Brush>(
                 continue;
             }
             let range = item.cluster_range.clone();
-            let classify = |cluster: &ClusterData| {
-                let character = cluster.info.source_char();
-                if matches!(character, '\n' | '\r') || crate::bidi::is_formatting_control(character)
-                {
-                    EdgeWhitespace::Transparent
-                } else if matches!(character, ' ' | '\t')
-                    && layout.styles[cluster.style_index as usize].line_edge_whitespace
-                        == crate::LineEdgeWhitespace::Collapse
-                {
-                    EdgeWhitespace::Collapsible
-                } else {
-                    EdgeWhitespace::Content
-                }
-            };
+            let classify = |cluster: &ClusterData| edge_whitespace(layout, cluster);
             let clusters = &layout.clusters[range.clone()];
             let Some(edge) = (if leading {
                 clusters.first()
@@ -1368,6 +1431,20 @@ enum EdgeWhitespace {
     Content,
     Collapsible,
     Transparent,
+}
+
+fn edge_whitespace<B: Brush>(layout: &LayoutData<B>, cluster: &ClusterData) -> EdgeWhitespace {
+    let character = cluster.info.source_char();
+    if matches!(character, '\n' | '\r') || crate::bidi::is_formatting_control(character) {
+        EdgeWhitespace::Transparent
+    } else if matches!(character, ' ' | '\t')
+        && layout.styles[cluster.style_index as usize].line_edge_whitespace
+            == crate::LineEdgeWhitespace::Collapse
+    {
+        EdgeWhitespace::Collapsible
+    } else {
+        EdgeWhitespace::Content
+    }
 }
 
 /// Apply UAX #9 L1 after line breaking, before visual reordering. A shaped run

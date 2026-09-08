@@ -3,6 +3,7 @@
 
 //! Test that the various builders produce the same results.
 
+mod custom_box_fit;
 mod inline_boundaries;
 mod line_edge_whitespace;
 mod out_of_flow;
