@@ -1,7 +1,7 @@
 // Copyright 2021 the Parley Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use crate::inline_box::InlineBox;
+use crate::inline_box::{InlineBoundaryAffinity, InlineBox};
 use crate::layout::{ContentWidths, Glyph, LineMetrics, RunMetrics, Style};
 use crate::style::Brush;
 use crate::util::nearly_zero;
@@ -527,6 +527,8 @@ impl<B: Brush> LayoutData<B> {
         let mut running_max_width = 0.0;
         let mut text_wrap_mode = TextWrapMode::Wrap;
         let mut prev_cluster: Option<&ClusterData> = None;
+        let mut inline_boundary = InlineBoundaryAffinity::<ContentWidths>::default();
+        let mut after_atomic = false;
         for item in &self.items {
             match item.kind {
                 LayoutItemKind::TextRun => {
@@ -537,48 +539,77 @@ impl<B: Brush> LayoutData<B> {
                         let style = &self.styles[cluster.style_index as usize];
                         let prev_text_wrap_mode = text_wrap_mode;
                         text_wrap_mode = style.text_wrap_mode;
-                        if boundary == Boundary::Mandatory
+                        if after_atomic
+                            || boundary == Boundary::Mandatory
                             || (prev_text_wrap_mode == TextWrapMode::Wrap
                                 && (boundary == Boundary::Line
                                     || style.overflow_wrap == OverflowWrap::Anywhere))
                         {
                             let trailing_whitespace = whitespace_advance(prev_cluster);
-                            min_width = min_width.max(running_min_width - trailing_whitespace);
-                            running_min_width = 0.0;
+                            let before = inline_boundary.before_opening().copied().unwrap_or(
+                                ContentWidths {
+                                    min: running_min_width,
+                                    max: running_max_width,
+                                },
+                            );
+                            min_width = min_width.max(before.min - trailing_whitespace);
+                            running_min_width -= before.min;
                             if boundary == Boundary::Mandatory {
-                                max_width = max_width.max(running_max_width - trailing_whitespace);
-                                running_max_width = 0.0;
+                                max_width = max_width.max(before.max - trailing_whitespace);
+                                running_max_width -= before.max;
                             }
                         }
+                        after_atomic = false;
+                        inline_boundary.consume_content();
                         running_min_width += cluster.advance;
                         running_max_width += cluster.advance;
                         prev_cluster = Some(cluster);
                     }
-                    let trailing_whitespace = whitespace_advance(prev_cluster);
-                    min_width = min_width.max(running_min_width - trailing_whitespace);
                 }
                 LayoutItemKind::InlineBox => {
                     let ibox = &self.inline_boxes[item.index];
-                    if ibox.kind == InlineBoxKind::InFlow {
-                        running_max_width += ibox.width;
-                        if text_wrap_mode == TextWrapMode::Wrap {
-                            let trailing_whitespace = whitespace_advance(prev_cluster);
-                            min_width = min_width.max(running_min_width - trailing_whitespace);
-                            min_width = min_width.max(ibox.width);
-                            running_min_width = 0.0;
-                        } else {
+                    match ibox.kind {
+                        InlineBoxKind::StartBoundary => {
+                            inline_boundary.open(ContentWidths {
+                                min: running_min_width,
+                                max: running_max_width,
+                            });
                             running_min_width += ibox.width;
+                            running_max_width += ibox.width;
                         }
-                        prev_cluster = None;
+                        InlineBoxKind::EndBoundary => {
+                            running_min_width += ibox.width;
+                            running_max_width += ibox.width;
+                            inline_boundary.close();
+                        }
+                        InlineBoxKind::InFlow => {
+                            if text_wrap_mode == TextWrapMode::Wrap {
+                                let before = inline_boundary.before_opening().copied().unwrap_or(
+                                    ContentWidths {
+                                        min: running_min_width,
+                                        max: running_max_width,
+                                    },
+                                );
+                                min_width =
+                                    min_width.max(before.min - whitespace_advance(prev_cluster));
+                                running_min_width -= before.min;
+                                after_atomic = true;
+                            }
+                            running_min_width += ibox.width;
+                            running_max_width += ibox.width;
+                            inline_boundary.consume_content();
+                            prev_cluster = None;
+                        }
+                        InlineBoxKind::TextBoundary => inline_boundary.consume_content(),
+                        InlineBoxKind::OutOfFlow | InlineBoxKind::CustomOutOfFlow => {}
                     }
                 }
             }
-            let trailing_whitespace = whitespace_advance(prev_cluster);
-            max_width = max_width.max(running_max_width - trailing_whitespace);
         }
 
         let trailing_whitespace = whitespace_advance(prev_cluster);
         min_width = min_width.max(running_min_width - trailing_whitespace);
+        max_width = max_width.max(running_max_width - trailing_whitespace);
 
         ContentWidths {
             min: min_width,

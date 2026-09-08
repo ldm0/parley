@@ -3,6 +3,7 @@
 
 //! Test that the various builders produce the same results.
 
+mod inline_boundaries;
 mod out_of_flow;
 
 use std::{borrow::Cow, path::PathBuf, sync::Arc, vec, vec::Vec};

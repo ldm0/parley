@@ -15,7 +15,7 @@ use core::ops::{Bound, Range, RangeBounds};
 use crate::break_overrides::LineBreakOverrideFn;
 use crate::inline_box::{InlineBox, InlineBoxInput};
 use crate::resolve::{ResolvedStyle, StyleRun, tree::ItemKind};
-use crate::{BaseDirection, InlineBoxBidi, InlineBoxKind};
+use crate::{BaseDirection, InlineBoxKind};
 
 #[derive(Clone, Copy)]
 pub(crate) struct BuilderOptions<'a> {
@@ -66,14 +66,7 @@ impl<'b, B: Brush> RangedBuilder<'b, B> {
     }
 
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.push_inline_box_with_bidi(inline_box, InlineBoxBidi::Neutral);
-    }
-
-    /// Adds an inline item with explicit bidi participation.
-    pub fn push_inline_box_with_bidi(&mut self, inline_box: InlineBox, bidi: InlineBoxBidi) {
-        self.lcx
-            .inline_boxes
-            .push(InlineBoxInput::new(inline_box, bidi));
+        self.lcx.inline_boxes.push(InlineBoxInput::new(inline_box));
     }
 
     /// Sets the paragraph's base direction.
@@ -171,14 +164,7 @@ impl<'b, B: Brush> StyleRunBuilder<'b, B> {
     }
 
     pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.push_inline_box_with_bidi(inline_box, InlineBoxBidi::Neutral);
-    }
-
-    /// Adds an inline item with explicit bidi participation.
-    pub fn push_inline_box_with_bidi(&mut self, inline_box: InlineBox, bidi: InlineBoxBidi) {
-        self.lcx
-            .inline_boxes
-            .push(InlineBoxInput::new(inline_box, bidi));
+        self.lcx.inline_boxes.push(InlineBoxInput::new(inline_box));
     }
 
     /// Sets the paragraph's base direction.
@@ -251,12 +237,7 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
         self.lcx.tree_style_builder.push_text(text);
     }
 
-    pub fn push_inline_box(&mut self, inline_box: InlineBox) {
-        self.push_inline_box_with_bidi(inline_box, InlineBoxBidi::Neutral);
-    }
-
-    /// Adds an inline item with explicit bidi participation.
-    pub fn push_inline_box_with_bidi(&mut self, mut inline_box: InlineBox, bidi: InlineBoxBidi) {
+    pub fn push_inline_box(&mut self, mut inline_box: InlineBox) {
         if inline_box.kind == InlineBoxKind::InFlow {
             self.lcx.tree_style_builder.push_uncommitted_text(false);
             self.lcx.tree_style_builder.set_is_span_first(false);
@@ -267,9 +248,7 @@ impl<'b, B: Brush> TreeBuilder<'b, B> {
 
         // TODO: arrange type better here to factor out the index
         inline_box.index = self.lcx.tree_style_builder.current_text_len();
-        self.lcx
-            .inline_boxes
-            .push(InlineBoxInput::new(inline_box, bidi));
+        self.lcx.inline_boxes.push(InlineBoxInput::new(inline_box));
     }
 
     pub fn set_white_space_mode(&mut self, white_space_collapse: WhiteSpaceCollapse) {

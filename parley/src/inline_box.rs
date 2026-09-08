@@ -22,8 +22,12 @@ impl InlineBox {
     /// The box's contribution to inline flow, independently of its own size.
     pub(crate) const fn advance(&self) -> f32 {
         match self.kind {
-            InlineBoxKind::InFlow => self.width,
-            InlineBoxKind::OutOfFlow | InlineBoxKind::CustomOutOfFlow => 0.0,
+            InlineBoxKind::InFlow | InlineBoxKind::StartBoundary | InlineBoxKind::EndBoundary => {
+                self.width
+            }
+            InlineBoxKind::TextBoundary
+            | InlineBoxKind::OutOfFlow
+            | InlineBoxKind::CustomOutOfFlow => 0.0,
         }
     }
 }
@@ -36,6 +40,20 @@ pub enum InlineBoxKind {
     ///
     /// They correspond to `display: inline-block` boxes in CSS.
     InFlow,
+    /// Opening edge of a non-atomic inline. Its signed width contributes to
+    /// inline flow and stays attached to the following content when wrapping.
+    /// It is transparent to text and bidi analysis, not a replacement character.
+    StartBoundary,
+    /// Closing edge of a non-atomic inline. Its signed width contributes to
+    /// inline flow and stays attached to the preceding content when wrapping.
+    /// Boundary heights do not supply atomic-box metrics.
+    EndBoundary,
+    /// An empty text item, for example a source text node whose whitespace
+    /// collapsed into preceding text. It retains its position among inline
+    /// edges without contributing a character, advance, or break opportunity.
+    /// A following text break occurs after this item, not before an opening
+    /// edge that precedes it.
+    TextBoundary,
     /// `OutOfFlow` boxes are assigned a position without taking up space or
     /// introducing a line-break opportunity. They do not interrupt the text's
     /// whitespace, wrapping, or intrinsic-width state.
@@ -50,33 +68,68 @@ pub enum InlineBoxKind {
     CustomOutOfFlow,
 }
 
-/// How an inline item participates in Unicode bidirectional analysis.
-///
-/// This is independent of whether the item occupies space in line layout.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum InlineBoxBidi {
-    /// A neutral object, analyzed as U+FFFC OBJECT REPLACEMENT CHARACTER.
-    #[default]
-    Neutral,
-    /// A transparent opening boundary, following the next content's level.
-    StartBoundary,
-    /// A transparent closing boundary, following the preceding content's level.
-    EndBoundary,
+impl InlineBoxKind {
+    pub(crate) fn is_boundary(self) -> bool {
+        matches!(
+            self,
+            Self::StartBoundary | Self::EndBoundary | Self::TextBoundary
+        )
+    }
+}
+
+/// Breaks at a text position precede its opening inline edges, but follow
+/// closing edges. Keep the outermost opening until content consumes it or all
+/// intervening empty inlines close. Both intrinsic and final layout use this
+/// affinity, with their own checkpoint representation.
+#[derive(Clone)]
+pub(crate) struct InlineBoundaryAffinity<T> {
+    opening: Option<(T, usize)>,
+}
+
+impl<T> Default for InlineBoundaryAffinity<T> {
+    fn default() -> Self {
+        Self { opening: None }
+    }
+}
+
+impl<T> InlineBoundaryAffinity<T> {
+    pub(crate) fn open(&mut self, before: T) {
+        if let Some((_, depth)) = &mut self.opening {
+            *depth += 1;
+        } else {
+            self.opening = Some((before, 1));
+        }
+    }
+
+    pub(crate) fn close(&mut self) {
+        if let Some((_, depth)) = &mut self.opening {
+            *depth -= 1;
+            if *depth == 0 {
+                self.opening = None;
+            }
+        }
+    }
+
+    pub(crate) fn before_opening(&self) -> Option<&T> {
+        self.opening.as_ref().map(|(before, _)| before)
+    }
+
+    pub(crate) fn consume_content(&mut self) {
+        self.opening = None;
+    }
 }
 
 /// Builder input and its resolved embedding level. Boundary items are not
 /// inserted into the text used for shaping, breaking, or bidi analysis.
 pub(crate) struct InlineBoxInput {
     pub(crate) inline_box: InlineBox,
-    pub(crate) bidi: InlineBoxBidi,
     pub(crate) bidi_level: u8,
 }
 
 impl InlineBoxInput {
-    pub(crate) fn new(inline_box: InlineBox, bidi: InlineBoxBidi) -> Self {
+    pub(crate) fn new(inline_box: InlineBox) -> Self {
         Self {
             inline_box,
-            bidi,
             bidi_level: 0,
         }
     }

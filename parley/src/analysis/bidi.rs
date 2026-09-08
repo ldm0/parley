@@ -7,7 +7,7 @@
 use core::slice;
 
 use crate::inline_box::InlineBoxInput;
-use crate::{BaseDirection, Brush, InlineBoxBidi, LayoutContext};
+use crate::{BaseDirection, Brush, InlineBoxKind, LayoutContext};
 
 pub(super) fn resolve<B: Brush>(
     lcx: &mut LayoutContext<B>,
@@ -24,7 +24,7 @@ pub(super) fn resolve<B: Brush>(
     let mut objects = lcx
         .inline_boxes
         .iter()
-        .filter(|input| input.bidi == InlineBoxBidi::Neutral)
+        .filter(|input| !input.inline_box.kind.is_boundary())
         .peekable();
     let input = core::iter::from_fn(|| {
         if objects.peek().is_some_and(|input| {
@@ -77,15 +77,17 @@ fn assign_box_level(
     levels: &mut slice::Iter<'_, u8>,
     previous: &mut u8,
 ) {
-    input.bidi_level = match input.bidi {
-        InlineBoxBidi::Neutral => {
+    input.bidi_level = match input.inline_box.kind {
+        InlineBoxKind::InFlow | InlineBoxKind::OutOfFlow | InlineBoxKind::CustomOutOfFlow => {
             *previous = *levels
                 .next()
                 .expect("every neutral object has a resolved bidi level");
             *previous
         }
-        InlineBoxBidi::StartBoundary => levels.as_slice().first().copied().unwrap_or(*previous),
-        InlineBoxBidi::EndBoundary => *previous,
+        InlineBoxKind::StartBoundary | InlineBoxKind::TextBoundary => {
+            levels.as_slice().first().copied().unwrap_or(*previous)
+        }
+        InlineBoxKind::EndBoundary => *previous,
     };
 }
 
@@ -99,7 +101,7 @@ mod tests {
     fn analyze(
         text: &str,
         direction: BaseDirection,
-        boxes: &[(usize, InlineBoxBidi)],
+        boxes: &[(usize, InlineBoxKind)],
     ) -> LayoutContext {
         let mut context = LayoutContext::new();
         context.style_table.push(ResolvedStyle::default());
@@ -109,17 +111,14 @@ mod tests {
         });
         context
             .inline_boxes
-            .extend(boxes.iter().map(|&(index, bidi)| {
-                InlineBoxInput::new(
-                    InlineBox {
-                        id: 0,
-                        kind: InlineBoxKind::InFlow,
-                        index,
-                        width: 10.0,
-                        height: 10.0,
-                    },
-                    bidi,
-                )
+            .extend(boxes.iter().map(|&(index, kind)| {
+                InlineBoxInput::new(InlineBox {
+                    id: 0,
+                    kind,
+                    index,
+                    width: 10.0,
+                    height: 10.0,
+                })
             }));
         crate::analysis::analyze_text(&mut context, text, None, direction);
         context
@@ -161,7 +160,7 @@ mod tests {
         ] {
             let boxes = offsets
                 .into_iter()
-                .map(|index| (index, InlineBoxBidi::Neutral))
+                .map(|index| (index, InlineBoxKind::InFlow))
                 .collect::<Vec<_>>();
             let context = analyze(text, direction, &boxes);
             assert_eq!(
@@ -182,10 +181,10 @@ mod tests {
             "אa",
             BaseDirection::Ltr,
             &[
-                (0, InlineBoxBidi::StartBoundary),
-                (2, InlineBoxBidi::EndBoundary),
-                (2, InlineBoxBidi::StartBoundary),
-                (3, InlineBoxBidi::EndBoundary),
+                (0, InlineBoxKind::StartBoundary),
+                (2, InlineBoxKind::EndBoundary),
+                (2, InlineBoxKind::StartBoundary),
+                (3, InlineBoxKind::EndBoundary),
             ],
         );
         assert_eq!(
@@ -211,11 +210,11 @@ mod tests {
         // Compare projection to literal replacement characters, including an
         // isolate and multiple objects at the same byte offset.
         let boxes = [
-            (0, InlineBoxBidi::Neutral),
-            (5, InlineBoxBidi::Neutral),
-            (5, InlineBoxBidi::Neutral),
-            (6, InlineBoxBidi::Neutral),
-            (12, InlineBoxBidi::Neutral),
+            (0, InlineBoxKind::InFlow),
+            (5, InlineBoxKind::InFlow),
+            (5, InlineBoxKind::InFlow),
+            (6, InlineBoxKind::InFlow),
+            (12, InlineBoxKind::InFlow),
         ];
         let projected = analyze("א\u{2066}ab\u{2069}ב", BaseDirection::Rtl, &boxes);
         let literal = analyze(
