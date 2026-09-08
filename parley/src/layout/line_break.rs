@@ -11,7 +11,7 @@ use core_maths::CoreFloat;
 
 use crate::analysis::Boundary;
 use crate::analysis::cluster::Whitespace;
-use crate::data::ClusterData;
+use crate::data::{ClusterData, RunWhitespace};
 use crate::inline_box::InlineBoundaryAffinity;
 use crate::layout::{
     BreakReason, Layout, LayoutData, LayoutItem, LayoutItemKind, LineData, LineItemData,
@@ -40,7 +40,9 @@ struct LineState {
     x: f32,
     items: Range<usize>,
     clusters: Range<usize>,
-    num_spaces: usize,
+    /// Structural edges and out-of-flow placeholders do not end the leading
+    /// collapsible-space sequence; text and atomic inline content do.
+    has_in_flow_content: bool,
     /// Of the line currently being built, the maximum line height seen so far.
     /// This represents a lower-bound on the eventual line height of the line.
     running_line_height: f32,
@@ -195,11 +197,21 @@ impl Default for BreakerState {
 impl BreakerState {
     /// Add the cluster(s) currently being evaluated to the current line
     pub fn append_cluster_to_line(&mut self, next_x: f32, clusters_height: f32) {
+        self.append_cluster_contribution(next_x, clusters_height, true);
+    }
+
+    fn append_cluster_contribution(
+        &mut self,
+        next_x: f32,
+        clusters_height: f32,
+        contributes: bool,
+    ) {
         self.inline_boundary.consume_content();
         self.line.items.end = self.item_idx + 1;
         self.line.clusters.end = self.cluster_idx + 1;
         self.cluster_idx += 1;
         self.line.x = next_x;
+        self.line.has_in_flow_content |= contributes;
         self.add_line_height(clusters_height);
     }
 
@@ -368,6 +380,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
         self.state.line.x = 0.;
         self.state.line.running_line_height = 0.;
+        self.state.line.has_in_flow_content = false;
         self.state.prev_boundary = None;
         self.state.emergency_boundary = None;
         self.state.inline_boundary.consume_content();
@@ -591,6 +604,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     self.state
                         .append_inline_box_to_line(next_x, height_contribution);
                     self.state.inline_boundary.consume_content();
+                    self.state.line.has_in_flow_content = true;
                     self.state.mark_line_break_opportunity();
                 }
                 LayoutItemKind::TextRun => {
@@ -616,6 +630,25 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         let line_height = run.metrics().line_height;
                         let max_height_exceeded = self.state.line.max_height_exceeded;
                         let style = &self.layout.data.styles[cluster.data.style_index as usize];
+
+                        // A leading collapsed space has no advance even while
+                        // selecting the break point, not just after the line
+                        // has been committed. Bidi controls are transparent to
+                        // this state but still retain their source clusters.
+                        if !self.state.line.has_in_flow_content {
+                            let character = cluster.info().source_char();
+                            let collapsible = matches!(character, ' ' | '\t')
+                                && style.line_edge_whitespace
+                                    == crate::LineEdgeWhitespace::Collapse;
+                            if collapsible || crate::bidi::is_formatting_control(character) {
+                                self.state.append_cluster_contribution(
+                                    self.state.line.x,
+                                    0.0,
+                                    false,
+                                );
+                                continue;
+                            }
+                        }
 
                         // Lag text_wrap_mode style by one cluster
                         let text_wrap_mode = self.state.line.text_wrap_mode;
@@ -692,9 +725,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                                 return self.max_height_break_data(line_height);
                             }
                             self.state.append_cluster_to_line(next_x, line_height);
-                            if is_space {
-                                self.state.line.num_spaces += 1;
-                            }
                         }
                         // Else we attempt to line break:
                         //
@@ -872,7 +902,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
                         let whitespace = cluster.info().whitespace();
                         let is_newline = whitespace == Whitespace::Newline;
-                        let is_space = whitespace.is_space_or_nbsp();
                         let advance = cluster.advance();
 
                         // Compute the x position.
@@ -885,10 +914,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         let line_height = run.metrics().line_height;
                         self.state.append_cluster_to_line(next_x, line_height);
                         char_count += 1;
-
-                        if is_space {
-                            self.state.line.num_spaces += 1;
-                        }
 
                         // Check if we've reached the limit after adding this cluster
                         if char_count >= max_chars {
@@ -981,6 +1006,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
     }
 
     fn finish_line(&mut self, line_idx: usize, line_height: f32) {
+        collapse_line_edge_whitespace(&self.layout.data, &mut self.lines, line_idx);
         reset_line_end_bidi_levels(&self.layout.data, &mut self.lines, line_idx);
         let prev_line_metrics = match line_idx {
             0 => None,
@@ -1030,14 +1056,18 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     line.text_range.start = line.text_range.start.min(line_item.text_range.start);
 
                     // Compute the run's advance by summing the advances of its constituent clusters
-                    line_item.advance = self.layout.data.clusters[line_item.cluster_range.clone()]
-                        .iter()
-                        .map(|c| c.advance)
-                        .sum();
+                    line_item.advance = if line_item.whitespace == RunWhitespace::Collapsed {
+                        0.0
+                    } else {
+                        self.layout.data.clusters[line_item.cluster_range.clone()]
+                            .iter()
+                            .map(|c| c.advance)
+                            .sum()
+                    };
 
                     // Ignore trailing whitespace for metrics computation
                     // (we are iterating backwards so trailing whitespace comes first)
-                    if !have_metrics && line_item.is_whitespace {
+                    if !have_metrics && line_item.is_whitespace() {
                         continue;
                     }
 
@@ -1061,13 +1091,20 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             line.text_range = index..index;
         }
 
+        line.metrics.advance = self.lines.line_items[line.item_range.clone()]
+            .iter()
+            .map(|item| item.advance)
+            .sum();
+
         // Measure logical trailing whitespace before visual reordering. L1
         // places it at the paragraph's trailing edge; run boundaries and
         // placeholders must not change how much whitespace is there.
-        line.metrics.trailing_whitespace = trailing_whitespace_advance(
+        let whitespace = measure_line_whitespace(
             &self.layout.data,
             self.lines.line_items[line.item_range.clone()].iter().rev(),
         );
+        line.metrics.trailing_whitespace = whitespace.trailing_advance;
+        line.num_spaces = whitespace.justification_spaces;
 
         // Reorder the items within the line (if required). Reordering is required if the line contains
         // a mix of bidi levels (a mix of LTR and RTL text)
@@ -1110,7 +1147,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         index,
                         bidi_level: 0,
                         advance: 0.,
-                        is_whitespace: false,
+                        whitespace: RunWhitespace::Content,
                         cluster_range: cluster..cluster,
                         text_range: text..text,
                     });
@@ -1221,6 +1258,118 @@ impl<B: Brush> Drop for BreakLines<'_, B> {
     }
 }
 
+/// Collapse line-edge whitespace in the line result, not in shared shaping
+/// data. Separate views retain every source cluster for cursor navigation and
+/// allow a subsequent width probe to expose the same space within a line.
+fn collapse_line_edge_whitespace<B: Brush>(
+    layout: &LayoutData<B>,
+    lines: &mut LineLayout,
+    line_idx: usize,
+) {
+    for leading in [true, false] {
+        let line = &mut lines.lines[line_idx];
+        let mut index = if leading {
+            line.item_range.start
+        } else {
+            line.item_range.end
+        };
+        loop {
+            if leading {
+                if index >= line.item_range.end {
+                    break;
+                }
+            } else {
+                if index <= line.item_range.start {
+                    break;
+                }
+                index -= 1;
+            }
+            let item = &mut lines.line_items[index];
+            if item.kind == LayoutItemKind::InlineBox {
+                if layout.inline_boxes[item.index].kind == InlineBoxKind::InFlow {
+                    break;
+                }
+                if leading {
+                    index += 1;
+                }
+                continue;
+            }
+            if item.whitespace == RunWhitespace::Collapsed {
+                if leading {
+                    index += 1;
+                }
+                continue;
+            }
+            let range = item.cluster_range.clone();
+            let classify = |cluster: &ClusterData| {
+                let character = cluster.info.source_char();
+                if matches!(character, '\n' | '\r') || crate::bidi::is_formatting_control(character)
+                {
+                    EdgeWhitespace::Transparent
+                } else if matches!(character, ' ' | '\t')
+                    && layout.styles[cluster.style_index as usize].line_edge_whitespace
+                        == crate::LineEdgeWhitespace::Collapse
+                {
+                    EdgeWhitespace::Collapsible
+                } else {
+                    EdgeWhitespace::Content
+                }
+            };
+            let clusters = &layout.clusters[range.clone()];
+            let Some(edge) = (if leading {
+                clusters.first()
+            } else {
+                clusters.last()
+            }) else {
+                if leading {
+                    index += 1;
+                }
+                continue;
+            };
+            let edge = classify(edge);
+            if edge == EdgeWhitespace::Content {
+                break;
+            }
+            let same_kind = |cluster: &&ClusterData| classify(cluster) == edge;
+            let count = if leading {
+                clusters.iter().take_while(same_kind).count()
+            } else {
+                clusters.iter().rev().take_while(same_kind).count()
+            };
+            let split = count < range.len();
+            let collapsed_index = if split {
+                let split_at = if leading {
+                    range.start + count
+                } else {
+                    range.end - count
+                };
+                let suffix = item.split_off(split_at, layout);
+                lines.line_items.insert(index + 1, suffix);
+                line.item_range.end += 1;
+                if leading { index } else { index + 1 }
+            } else {
+                index
+            };
+            let collapsed = &mut lines.line_items[collapsed_index];
+            if edge == EdgeWhitespace::Collapsible {
+                collapsed.whitespace = RunWhitespace::Collapsed;
+            }
+            index = if leading {
+                collapsed_index + 1
+            } else {
+                collapsed_index
+            };
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EdgeWhitespace {
+    Content,
+    Collapsible,
+    Transparent,
+}
+
 /// Apply UAX #9 L1 after line breaking, before visual reordering. A shaped run
 /// may contain both visible text and the new line's trailing whitespace, so
 /// split only its line-local view; shaping data and source offsets stay intact.
@@ -1254,15 +1403,8 @@ fn reset_line_end_bidi_levels<B: Brush>(
             continue;
         }
         if trailing_start < item.cluster_range.end && item.bidi_level != layout.base_level {
-            let text_offset = layout.clusters[trailing_start]
-                .text_range(&layout.runs[item.index])
-                .start;
-            let mut whitespace = item.clone();
-            whitespace.cluster_range.start = trailing_start;
-            whitespace.text_range.start = text_offset;
+            let mut whitespace = item.split_off(trailing_start, layout);
             whitespace.bidi_level = layout.base_level;
-            item.cluster_range.end = trailing_start;
-            item.text_range.end = text_offset;
             lines.line_items.insert(index + 1, whitespace);
             line.item_range.end += 1;
         }
@@ -1270,36 +1412,47 @@ fn reset_line_end_bidi_levels<B: Brush>(
     }
 }
 
-/// Walk backward from the logical line end. Out-of-flow items do not stop
-/// the whitespace run, including when they split it into several text items.
-fn trailing_whitespace_advance<'a, B: Brush>(
+#[derive(Default)]
+struct LineWhitespace {
+    trailing_advance: f32,
+    justification_spaces: usize,
+}
+
+/// Measure surviving whitespace in logical order before bidi reordering.
+/// Collapsed spaces have neither hanging advance nor justification opportunities.
+/// Structural edges and out-of-flow items do not end the trailing sequence.
+fn measure_line_whitespace<'a, B: Brush>(
     layout: &LayoutData<B>,
     items: impl Iterator<Item = &'a LineItemData>,
-) -> f32 {
-    fn whitespace_advance<'a>(clusters: impl Iterator<Item = &'a ClusterData>) -> f32 {
-        clusters
-            .take_while(|cluster| cluster.info.whitespace() != Whitespace::None)
-            .map(|cluster| cluster.advance)
-            .sum()
-    }
-    let mut advance = 0.0;
+) -> LineWhitespace {
+    let mut result = LineWhitespace::default();
+    let mut trailing = true;
     for item in items {
         match item.kind {
             LayoutItemKind::InlineBox => {
                 if layout.inline_boxes[item.index].kind == InlineBoxKind::InFlow {
-                    break;
+                    trailing = false;
                 }
             }
             LayoutItemKind::TextRun => {
+                if item.whitespace == RunWhitespace::Collapsed {
+                    continue;
+                }
                 let clusters = &layout.clusters[item.cluster_range.clone()];
-                advance += whitespace_advance(clusters.iter().rev());
-                if !item.is_whitespace {
-                    break;
+                for cluster in clusters.iter().rev() {
+                    let whitespace = cluster.info.whitespace();
+                    if trailing && whitespace != Whitespace::None {
+                        result.trailing_advance += cluster.advance;
+                    } else if whitespace.is_space_or_nbsp() {
+                        result.justification_spaces += 1;
+                    } else if !crate::bidi::is_formatting_control(cluster.info.source_char()) {
+                        trailing = false;
+                    }
                 }
             }
         }
     }
-    advance
+    result
 }
 
 fn commit_line<B: Brush>(
@@ -1342,7 +1495,7 @@ fn commit_line<B: Brush>(
                     advance: inline_box.advance(),
 
                     // These properties are ignored for inline boxes. So we just put a dummy value.
-                    is_whitespace: false,
+                    whitespace: RunWhitespace::Content,
                     cluster_range: 0..0,
                     text_range: 0..0,
                 });
@@ -1391,7 +1544,7 @@ fn commit_line<B: Brush>(
                     index: item.index,
                     bidi_level: run_data.bidi_level,
                     advance: 0.,
-                    is_whitespace: false,
+                    whitespace: RunWhitespace::Content,
                     cluster_range,
                     text_range,
                 });
@@ -1401,26 +1554,10 @@ fn commit_line<B: Brush>(
     // let end_run_idx = lines.line_items.last().map(|item| item.index).unwrap_or(0);
     let end_item_idx = lines.line_items.len();
 
-    // Exclude the trailing space from justification space count.
-    // Only subtract if the line actually ends with a space — with
-    // WordBreak::BreakAll, regular breaks can land between non-space
-    // characters, in which case there is no trailing space to exclude.
-    let mut num_spaces = state.num_spaces;
-    if break_reason == BreakReason::Regular
-        && state.clusters.start < state.clusters.end
-        && layout.data.clusters[state.clusters.end - 1]
-            .info
-            .whitespace()
-            .is_space_or_nbsp()
-    {
-        num_spaces = num_spaces.saturating_sub(1);
-    }
-
     lines.lines.push(LineData {
         item_range: start_item_idx..end_item_idx,
         max_advance,
         break_reason,
-        num_spaces,
         indent: line_indent,
         metrics: LineMetrics {
             advance: state.x,
@@ -1430,7 +1567,6 @@ fn commit_line<B: Brush>(
     });
 
     // Reset state for the new line
-    state.num_spaces = 0;
     if committed_text_run {
         state.clusters.start = state.clusters.end;
     }

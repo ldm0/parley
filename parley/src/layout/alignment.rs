@@ -167,7 +167,10 @@ fn align_impl<B: Brush, const UNDO_JUSTIFICATION: bool>(
                     &mut layout.line_items[line.item_range.clone()].iter()
                 };
                 line_items
-                    .filter(|item| item.is_text_run())
+                    .filter(|item| {
+                        item.is_text_run()
+                            && item.whitespace != super::data::RunWhitespace::Collapsed
+                    })
                     .for_each(|line_item| {
                         let clusters = &mut layout.clusters[line_item.cluster_range.clone()];
                         let line_item_is_rtl = line_item.bidi_level & 1 != 0;

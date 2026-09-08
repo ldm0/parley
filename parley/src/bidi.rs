@@ -9,6 +9,12 @@ use icu_properties::props::{BidiClass, BidiMirroringGlyph, BidiPairedBracketType
 /// Type alias for a bidirectional level.
 pub(crate) type BidiLevel = u8;
 
+/// Directional controls remain in source text without ending a line-edge
+/// collapsible whitespace sequence.
+pub(crate) fn is_formatting_control(character: char) -> bool {
+    matches!(character, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Resolver for the Unicode bidirectional algorithm.
 #[derive(Clone, Default)]
 pub(crate) struct BidiResolver {

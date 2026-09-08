@@ -191,8 +191,9 @@ pub(crate) struct LineItemData {
 
     // Fields that only apply to text runs (Ignored for boxes)
     // TODO: factor this out?
-    /// True if the run is composed entirely of whitespace.
-    pub(crate) is_whitespace: bool,
+    /// Line-local whitespace result. Source clusters remain available for
+    /// cursor navigation even when their geometry is collapsed.
+    pub(crate) whitespace: RunWhitespace,
     /// Range of the source text.
     pub(crate) text_range: Range<usize>,
     /// Range of clusters.
@@ -205,11 +206,45 @@ impl LineItemData {
     }
 
     pub(crate) fn compute_whitespace<B: Brush>(&mut self, layout_data: &LayoutData<B>) {
-        self.is_whitespace = self.is_text_run()
+        if self.whitespace == RunWhitespace::Collapsed {
+            return;
+        }
+        self.whitespace = if self.is_text_run()
             && layout_data.clusters[self.cluster_range.clone()]
                 .iter()
-                .all(|cluster| cluster.info.is_whitespace());
+                .all(|cluster| cluster.info.is_whitespace())
+        {
+            RunWhitespace::Preserved
+        } else {
+            RunWhitespace::Content
+        };
     }
+
+    pub(crate) fn is_whitespace(&self) -> bool {
+        self.whitespace != RunWhitespace::Content
+    }
+
+    /// Split a line-local run view without reshaping or changing source data.
+    pub(crate) fn split_off<B: Brush>(&mut self, cluster: usize, layout: &LayoutData<B>) -> Self {
+        debug_assert!(self.is_text_run());
+        debug_assert!(self.cluster_range.start < cluster && cluster < self.cluster_range.end);
+        let text = layout.clusters[cluster]
+            .text_range(&layout.runs[self.index])
+            .start;
+        let mut suffix = self.clone();
+        suffix.cluster_range.start = cluster;
+        suffix.text_range.start = text;
+        self.cluster_range.end = cluster;
+        self.text_range.end = text;
+        suffix
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunWhitespace {
+    Content,
+    Preserved,
+    Collapsed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -514,10 +549,52 @@ impl<B: Brush> LayoutData<B> {
     // Runs and clusters are stored in logical order. Width accumulation and
     // break boundaries use that order, independently of paragraph direction.
     pub(crate) fn calculate_content_widths(&self) -> ContentWidths {
-        fn whitespace_advance(cluster: Option<&ClusterData>) -> f32 {
-            cluster
-                .filter(|cluster| cluster.info.whitespace().is_space_or_nbsp())
-                .map_or(0.0, |cluster| cluster.advance)
+        // Each intrinsic probe has its own candidate line edges: min-content
+        // ends at every wrap opportunity, max-content only at forced breaks.
+        // Neither probe changes the clusters used by actual line breaking.
+        struct WhitespaceState {
+            leading: bool,
+            trailing: f32,
+        }
+        impl WhitespaceState {
+            fn new() -> Self {
+                Self {
+                    leading: true,
+                    trailing: 0.0,
+                }
+            }
+            fn content(&mut self) {
+                self.leading = false;
+                self.trailing = 0.0;
+            }
+            fn advance<B: Brush>(&mut self, cluster: &ClusterData, style: &Style<B>) -> f32 {
+                let character = cluster.info.source_char();
+                let collapse = style.line_edge_whitespace == crate::LineEdgeWhitespace::Collapse;
+                if crate::bidi::is_formatting_control(character) {
+                    return cluster.advance;
+                }
+                if matches!(character, '\n' | '\r') {
+                    if !collapse {
+                        self.trailing = 0.0;
+                    }
+                    return cluster.advance;
+                }
+                let collapsible = collapse && matches!(character, ' ' | '\t');
+                let advance = if self.leading && collapsible {
+                    0.0
+                } else {
+                    cluster.advance
+                };
+                self.leading &= collapsible;
+                self.trailing = if collapsible {
+                    self.trailing + advance
+                } else if cluster.info.whitespace().is_space_or_nbsp() {
+                    advance
+                } else {
+                    0.0
+                };
+                advance
+            }
         }
 
         let mut min_width = 0.0_f32;
@@ -526,7 +603,8 @@ impl<B: Brush> LayoutData<B> {
         let mut running_min_width = 0.0;
         let mut running_max_width = 0.0;
         let mut text_wrap_mode = TextWrapMode::Wrap;
-        let mut prev_cluster: Option<&ClusterData> = None;
+        let mut min_whitespace = WhitespaceState::new();
+        let mut max_whitespace = WhitespaceState::new();
         let mut inline_boundary = InlineBoundaryAffinity::<ContentWidths>::default();
         let mut after_atomic = false;
         for item in &self.items {
@@ -545,25 +623,25 @@ impl<B: Brush> LayoutData<B> {
                                 && (boundary == Boundary::Line
                                     || style.overflow_wrap == OverflowWrap::Anywhere))
                         {
-                            let trailing_whitespace = whitespace_advance(prev_cluster);
                             let before = inline_boundary.before_opening().copied().unwrap_or(
                                 ContentWidths {
                                     min: running_min_width,
                                     max: running_max_width,
                                 },
                             );
-                            min_width = min_width.max(before.min - trailing_whitespace);
+                            min_width = min_width.max(before.min - min_whitespace.trailing);
                             running_min_width -= before.min;
+                            min_whitespace = WhitespaceState::new();
                             if boundary == Boundary::Mandatory {
-                                max_width = max_width.max(before.max - trailing_whitespace);
+                                max_width = max_width.max(before.max - max_whitespace.trailing);
                                 running_max_width -= before.max;
+                                max_whitespace = WhitespaceState::new();
                             }
                         }
                         after_atomic = false;
                         inline_boundary.consume_content();
-                        running_min_width += cluster.advance;
-                        running_max_width += cluster.advance;
-                        prev_cluster = Some(cluster);
+                        running_min_width += min_whitespace.advance(cluster, style);
+                        running_max_width += max_whitespace.advance(cluster, style);
                     }
                 }
                 LayoutItemKind::InlineBox => {
@@ -590,15 +668,15 @@ impl<B: Brush> LayoutData<B> {
                                         max: running_max_width,
                                     },
                                 );
-                                min_width =
-                                    min_width.max(before.min - whitespace_advance(prev_cluster));
+                                min_width = min_width.max(before.min - min_whitespace.trailing);
                                 running_min_width -= before.min;
                                 after_atomic = true;
                             }
                             running_min_width += ibox.width;
                             running_max_width += ibox.width;
                             inline_boundary.consume_content();
-                            prev_cluster = None;
+                            min_whitespace.content();
+                            max_whitespace.content();
                         }
                         InlineBoxKind::TextBoundary => inline_boundary.consume_content(),
                         InlineBoxKind::OutOfFlow | InlineBoxKind::CustomOutOfFlow => {}
@@ -607,9 +685,8 @@ impl<B: Brush> LayoutData<B> {
             }
         }
 
-        let trailing_whitespace = whitespace_advance(prev_cluster);
-        min_width = min_width.max(running_min_width - trailing_whitespace);
-        max_width = max_width.max(running_max_width - trailing_whitespace);
+        min_width = min_width.max(running_min_width - min_whitespace.trailing);
+        max_width = max_width.max(running_max_width - max_whitespace.trailing);
 
         ContentWidths {
             min: min_width,

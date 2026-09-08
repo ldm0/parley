@@ -4,6 +4,7 @@
 //! Test that the various builders produce the same results.
 
 mod inline_boundaries;
+mod line_edge_whitespace;
 mod out_of_flow;
 
 use std::{borrow::Cow, path::PathBuf, sync::Arc, vec, vec::Vec};
@@ -310,6 +311,7 @@ fn create_root_style() -> TextStyle<'static, 'static, ColorBrush> {
         letter_spacing: 1.5,
         word_break: WordBreak::BreakAll,
         overflow_wrap: OverflowWrap::Anywhere,
+        line_edge_whitespace: crate::LineEdgeWhitespace::Preserve,
         text_wrap_mode: TextWrapMode::Wrap,
     }
 }

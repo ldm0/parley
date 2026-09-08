@@ -156,7 +156,19 @@ impl<'a, B: Brush> Cluster<'a, B> {
 
     /// Returns the advance of the cluster.
     pub fn advance(&self) -> f32 {
-        self.data.advance
+        if self.is_collapsed() {
+            0.0
+        } else {
+            self.data.advance
+        }
+    }
+
+    /// Whether this source cluster was collapsed at a line edge. Its source
+    /// range and cursor position remain available, but it has no visible glyphs.
+    pub fn is_collapsed(&self) -> bool {
+        self.run
+            .line_data
+            .is_some_and(|item| item.whitespace == super::data::RunWhitespace::Collapsed)
     }
 
     /// Returns `true` if this is a right-to-left cluster.
@@ -205,7 +217,9 @@ impl<'a, B: Brush> Cluster<'a, B> {
 
     /// Returns an iterator over the glyphs in the cluster.
     pub fn glyphs(&self) -> impl Iterator<Item = Glyph> + 'a + Clone {
-        if self.data.glyph_len == 0xFF {
+        if self.is_collapsed() {
+            GlyphIter::Single(None)
+        } else if self.data.glyph_len == 0xFF {
             GlyphIter::Single(Some(Glyph {
                 id: self.data.glyph_offset,
                 style_index: self.data.style_index,

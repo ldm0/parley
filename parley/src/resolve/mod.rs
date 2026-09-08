@@ -17,8 +17,8 @@ use super::style::{
 use crate::font::FontContext;
 use crate::style::TextStyle;
 use crate::util::nearly_eq;
+use crate::{LineEdgeWhitespace, TextWrapMode, WordBreak};
 use crate::{LineHeight, OverflowWrap, layout};
-use crate::{TextWrapMode, WordBreak};
 use core::borrow::Borrow;
 use core::ops::Range;
 use fontique::FamilyId;
@@ -166,6 +166,7 @@ impl ResolveContext {
             StyleProperty::WordBreak(value) => WordBreak(*value),
             StyleProperty::OverflowWrap(value) => OverflowWrap(*value),
             StyleProperty::TextWrapMode(value) => TextWrapMode(*value),
+            StyleProperty::LineEdgeWhitespace(value) => LineEdgeWhitespace(*value),
         }
     }
 
@@ -203,6 +204,7 @@ impl ResolveContext {
             word_break: raw_style.word_break,
             overflow_wrap: raw_style.overflow_wrap,
             text_wrap_mode: raw_style.text_wrap_mode,
+            line_edge_whitespace: raw_style.line_edge_whitespace,
         }
     }
 
@@ -387,6 +389,8 @@ pub(crate) enum ResolvedProperty<B: Brush> {
     OverflowWrap(OverflowWrap),
     /// Control over non-"emergency" line-breaking.
     TextWrapMode(TextWrapMode),
+    /// Treatment of normalized spaces at line edges.
+    LineEdgeWhitespace(LineEdgeWhitespace),
 }
 
 /// Flattened group of style properties.
@@ -426,6 +430,8 @@ pub(crate) struct ResolvedStyle<B: Brush> {
     pub(crate) overflow_wrap: OverflowWrap,
     /// Control over non-"emergency" line-breaking.
     pub(crate) text_wrap_mode: TextWrapMode,
+    /// Treatment of normalized spaces at line edges.
+    pub(crate) line_edge_whitespace: LineEdgeWhitespace,
 }
 
 impl<B: Brush> ResolvedStyle<B> {
@@ -456,6 +462,7 @@ impl<B: Brush> ResolvedStyle<B> {
             WordBreak(value) => self.word_break = value,
             OverflowWrap(value) => self.overflow_wrap = value,
             TextWrapMode(value) => self.text_wrap_mode = value,
+            LineEdgeWhitespace(value) => self.line_edge_whitespace = value,
         }
     }
 
@@ -485,6 +492,7 @@ impl<B: Brush> ResolvedStyle<B> {
             WordBreak(value) => self.word_break == *value,
             OverflowWrap(value) => self.overflow_wrap == *value,
             TextWrapMode(value) => self.text_wrap_mode == *value,
+            LineEdgeWhitespace(value) => self.line_edge_whitespace == *value,
         }
     }
 
@@ -496,6 +504,7 @@ impl<B: Brush> ResolvedStyle<B> {
             line_height: self.line_height,
             overflow_wrap: self.overflow_wrap,
             text_wrap_mode: self.text_wrap_mode,
+            line_edge_whitespace: self.line_edge_whitespace,
             #[cfg(feature = "accesskit")]
             locale: self.locale,
         }

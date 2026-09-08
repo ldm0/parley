@@ -26,6 +26,17 @@ pub enum WhiteSpaceCollapse {
     Preserve,
 }
 
+/// Treatment of normalized spaces at a line edge. This is distinct from
+/// preprocessing source whitespace: line edges are only known after wrapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineEdgeWhitespace {
+    /// Keep whitespace in the line's source and geometry (the default for text editing).
+    #[default]
+    Preserve,
+    /// Keep source offsets, but remove collapsible spaces from line-edge geometry.
+    Collapse,
+}
+
 /// The height that this text takes up. The default is `MetricsRelative(1.0)`, which is the given
 /// font's preferred line height.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -117,6 +128,8 @@ pub enum StyleProperty<'a, B: Brush> {
     OverflowWrap(OverflowWrap),
     /// Control over non-"emergency" line-breaking.
     TextWrapMode(TextWrapMode),
+    /// Treatment of normalized spaces at line edges.
+    LineEdgeWhitespace(LineEdgeWhitespace),
 }
 
 /// Unresolved styles.
@@ -168,6 +181,8 @@ pub struct TextStyle<'family, 'settings, B: Brush> {
     pub overflow_wrap: OverflowWrap,
     /// Control over non-"emergency" line-breaking.
     pub text_wrap_mode: TextWrapMode,
+    /// Treatment of normalized spaces at line edges.
+    pub line_edge_whitespace: LineEdgeWhitespace,
 }
 
 impl<B: Brush> Default for TextStyle<'static, 'static, B> {
@@ -196,6 +211,7 @@ impl<B: Brush> Default for TextStyle<'static, 'static, B> {
             word_break: WordBreak::default(),
             overflow_wrap: OverflowWrap::default(),
             text_wrap_mode: TextWrapMode::default(),
+            line_edge_whitespace: LineEdgeWhitespace::default(),
         }
     }
 }
