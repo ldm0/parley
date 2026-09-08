@@ -3,6 +3,8 @@
 
 //! Test that the various builders produce the same results.
 
+mod out_of_flow;
+
 use std::{borrow::Cow, path::PathBuf, sync::Arc, vec, vec::Vec};
 
 use fontique::{Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, SourceCache};

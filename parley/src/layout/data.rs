@@ -193,8 +193,6 @@ pub(crate) struct LineItemData {
     // TODO: factor this out?
     /// True if the run is composed entirely of whitespace.
     pub(crate) is_whitespace: bool,
-    /// True if the run ends in whitespace.
-    pub(crate) has_trailing_whitespace: bool,
     /// Range of the source text.
     pub(crate) text_range: Range<usize>,
     /// Range of clusters.
@@ -206,44 +204,11 @@ impl LineItemData {
         self.kind == LayoutItemKind::TextRun
     }
 
-    #[inline(always)]
-    pub(crate) fn is_rtl(&self) -> bool {
-        self.bidi_level & 1 != 0
-    }
-
-    /// If the item is a text run
-    ///   - Determine if it consists entirely of whitespace (`is_whitespace` property)
-    ///   - Determine if it has trailing whitespace (`has_trailing_whitespace` property)
-    pub(crate) fn compute_whitespace_properties<B: Brush>(&mut self, layout_data: &LayoutData<B>) {
-        // Skip items which are not text runs
-        if self.kind != LayoutItemKind::TextRun {
-            return;
-        }
-
-        self.is_whitespace = true;
-        if self.is_rtl() {
-            // RTL runs check for "trailing" whitespace at the front.
-            for cluster in layout_data.clusters[self.cluster_range.clone()].iter() {
-                if cluster.info.is_whitespace() {
-                    self.has_trailing_whitespace = true;
-                } else {
-                    self.is_whitespace = false;
-                    break;
-                }
-            }
-        } else {
-            for cluster in layout_data.clusters[self.cluster_range.clone()]
+    pub(crate) fn compute_whitespace<B: Brush>(&mut self, layout_data: &LayoutData<B>) {
+        self.is_whitespace = self.is_text_run()
+            && layout_data.clusters[self.cluster_range.clone()]
                 .iter()
-                .rev()
-            {
-                if cluster.info.is_whitespace() {
-                    self.has_trailing_whitespace = true;
-                } else {
-                    self.is_whitespace = false;
-                    break;
-                }
-            }
-        }
+                .all(|cluster| cluster.info.is_whitespace());
     }
 }
 
@@ -546,7 +511,8 @@ impl<B: Brush> LayoutData<B> {
         }
     }
 
-    // TODO: this method does not handle mixed direction text at all.
+    // Runs and clusters are stored in logical order. Width accumulation and
+    // break boundaries use that order, independently of paragraph direction.
     pub(crate) fn calculate_content_widths(&self) -> ContentWidths {
         fn whitespace_advance(cluster: Option<&ClusterData>) -> f32 {
             cluster
@@ -561,15 +527,11 @@ impl<B: Brush> LayoutData<B> {
         let mut running_max_width = 0.0;
         let mut text_wrap_mode = TextWrapMode::Wrap;
         let mut prev_cluster: Option<&ClusterData> = None;
-        let is_rtl = self.base_level & 1 == 1;
         for item in &self.items {
             match item.kind {
                 LayoutItemKind::TextRun => {
                     let run = &self.runs[item.index];
                     let clusters = &self.clusters[run.cluster_range.clone()];
-                    if is_rtl {
-                        prev_cluster = clusters.first();
-                    }
                     for cluster in clusters {
                         let boundary = cluster.info.boundary();
                         let style = &self.styles[cluster.style_index as usize];
@@ -590,9 +552,7 @@ impl<B: Brush> LayoutData<B> {
                         }
                         running_min_width += cluster.advance;
                         running_max_width += cluster.advance;
-                        if !is_rtl {
-                            prev_cluster = Some(cluster);
-                        }
+                        prev_cluster = Some(cluster);
                     }
                     let trailing_whitespace = whitespace_advance(prev_cluster);
                     min_width = min_width.max(running_min_width - trailing_whitespace);
@@ -609,8 +569,8 @@ impl<B: Brush> LayoutData<B> {
                         } else {
                             running_min_width += ibox.width;
                         }
+                        prev_cluster = None;
                     }
-                    prev_cluster = None;
                 }
             }
             let trailing_whitespace = whitespace_advance(prev_cluster);

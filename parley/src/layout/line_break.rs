@@ -344,8 +344,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         let line_height = self.state.line.running_line_height;
         let line_y_start = self.state.line_y;
 
-        self.state.items = self.lines.line_items.len();
-        self.state.lines = self.lines.lines.len();
         self.state.line.x = 0.;
         self.state.line.running_line_height = 0.;
         self.state.prev_boundary = None;
@@ -353,7 +351,11 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
         self.finish_line(self.lines.lines.len() - 1, line_height);
 
-        self.state.line_y += line_height as f64;
+        // Finishing can split trailing bidi whitespace or add an empty cursor
+        // run. Checkpoints must include those finalized line items as well.
+        self.state.items = self.lines.line_items.len();
+        self.state.lines = self.lines.lines.len();
+        self.state.line_y += self.lines.lines.last().unwrap().metrics.line_height as f64;
 
         Some(YieldData::LineBreak(
             self.last_line_data(reason, line_y_start),
@@ -496,7 +498,14 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
                     let (width_contribution, height_contribution) = match inline_box.kind {
                         InlineBoxKind::InFlow => (inline_box.width, inline_box.height),
-                        InlineBoxKind::OutOfFlow => (0.0, 0.0),
+                        InlineBoxKind::OutOfFlow => {
+                            // A placeholder preserves the existing break state,
+                            // even when the current unbreakable text overflows.
+                            // Treating it as a zero-width atomic box would add
+                            // a new break after it, or break before it here.
+                            self.state.append_inline_box_to_line(self.state.line.x, 0.0);
+                            continue;
+                        }
                         // If the box is a `CustomOutOfFlow` box then we yield control flow back to the caller.
                         // It is then the caller's responsibility to handle placement of the box.
                         InlineBoxKind::CustomOutOfFlow => {
@@ -896,6 +905,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
     }
 
     fn finish_line(&mut self, line_idx: usize, line_height: f32) {
+        reset_line_end_bidi_levels(&self.layout.data, &mut self.lines, line_idx);
         let prev_line_metrics = match line_idx {
             0 => None,
             idx => Some(self.lines.lines[idx - 1].metrics),
@@ -911,9 +921,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
 
         line.metrics.line_height = line_height;
 
-        if line.item_range.is_empty() {
-            line.text_range = self.layout.data.text_len..self.layout.data.text_len;
-        }
         // Compute metrics for the line, but ignore trailing whitespace.
         let mut have_metrics = false;
         let mut needs_reorder = false;
@@ -939,7 +946,7 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     }
                 }
                 LayoutItemKind::TextRun => {
-                    line_item.compute_whitespace_properties(&self.layout.data);
+                    line_item.compute_whitespace(&self.layout.data);
 
                     // Compute the text range for the line
                     // Q: Can we not simplify this computation by assuming that items are in order?
@@ -969,6 +976,23 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             }
         }
 
+        if line.text_range.start == usize::MAX {
+            // A line containing only boxes still has a valid insertion point.
+            let index = self.lines.line_items[line.item_range.clone()]
+                .first()
+                .map(|item| self.layout.data.inline_boxes[item.index].index)
+                .unwrap_or(self.layout.data.text_len);
+            line.text_range = index..index;
+        }
+
+        // Measure logical trailing whitespace before visual reordering. L1
+        // places it at the paragraph's trailing edge; run boundaries and
+        // placeholders must not change how much whitespace is there.
+        line.metrics.trailing_whitespace = trailing_whitespace_advance(
+            &self.layout.data,
+            self.lines.line_items[line.item_range.clone()].iter().rev(),
+        );
+
         // Reorder the items within the line (if required). Reordering is required if the line contains
         // a mix of bidi levels (a mix of LTR and RTL text)
         let item_count = line.item_range.end - line.item_range.start;
@@ -976,50 +1000,25 @@ impl<'a, B: Brush> BreakLines<'a, B> {
             reorder_line_items(&mut self.lines.line_items[line.item_range.clone()]);
         }
 
-        // Compute size of line's trailing whitespace. "Trailing" is considered the right edge
-        // for LTR text and the left edge for RTL text.
-        let run = if self.layout.is_rtl() {
-            self.lines.line_items[line.item_range.clone()].first()
-        } else {
-            self.lines.line_items[line.item_range.clone()].last()
-        };
-        line.metrics.trailing_whitespace = run
-            .filter(|item| item.is_text_run() && item.has_trailing_whitespace)
-            .map(|run| {
-                fn whitespace_advance<'c, I: Iterator<Item = &'c ClusterData>>(clusters: I) -> f32 {
-                    clusters
-                        .take_while(|cluster| cluster.info.whitespace() != Whitespace::None)
-                        .map(|cluster| cluster.advance)
-                        .sum()
-                }
-
-                let clusters = &self.layout.data.clusters[run.cluster_range.clone()];
-                if run.is_rtl() {
-                    whitespace_advance(clusters.iter())
-                } else {
-                    whitespace_advance(clusters.iter().rev())
-                }
-            })
-            .unwrap_or(0.0);
-
         if !have_metrics {
-            // Line consisting entirely of whitespace?
-            if !line.item_range.is_empty() {
-                let line_item = &self.lines.line_items[line.item_range.start];
-                if line_item.is_text_run() {
-                    let run = &self.layout.data.runs[line_item.index];
-                    line.metrics.ascent = run.metrics.ascent;
-                    line.metrics.descent = run.metrics.descent;
-                }
+            // Whitespace-only lines use their text's font metrics, even when
+            // a placeholder precedes that text.
+            if let Some(line_item) = self.lines.line_items[line.item_range.clone()]
+                .iter()
+                .find(|item| item.is_text_run())
+            {
+                let run = &self.layout.data.runs[line_item.index];
+                line.metrics.ascent = run.metrics.ascent;
+                line.metrics.descent = run.metrics.descent;
             } else if let Some(metrics) = prev_line_metrics {
-                // HACK: copy metrics from previous line if we don't have
-                // any; this should only occur for an empty line following
-                // a newline at the end of a layout
-                line.metrics = metrics;
-                // If we have no items on this line, it must be the last (empty)
-                // line in a layout following a newline. Commit an empty run so
-                // that AccessKit has a node with which to identify the visual
-                // cursor position
+                // The empty line after a final newline retains its vertical
+                // metrics, not its predecessor's advance or whitespace. An
+                // out-of-flow placeholder does not make this line nonempty.
+                line.metrics.ascent = metrics.ascent;
+                line.metrics.descent = metrics.descent;
+                line.metrics.line_height = metrics.line_height;
+                // Keep an empty text run for the visual cursor / AccessKit,
+                // without discarding any placeholders already on the line.
                 if let Some((index, run)) = self
                     .layout
                     .data
@@ -1028,7 +1027,6 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                     .enumerate()
                     .rfind(|(_, run)| !run.text_range.is_empty())
                 {
-                    let run_index = self.lines.line_items.len();
                     let cluster = run.cluster_range.end;
                     let text = run.text_range.end;
                     self.lines.line_items.push(LineItemData {
@@ -1037,11 +1035,10 @@ impl<'a, B: Brush> BreakLines<'a, B> {
                         bidi_level: 0,
                         advance: 0.,
                         is_whitespace: false,
-                        has_trailing_whitespace: false,
                         cluster_range: cluster..cluster,
                         text_range: text..text,
                     });
-                    line.item_range = run_index..run_index + 1;
+                    line.item_range.end = self.lines.line_items.len();
                 }
             }
         }
@@ -1148,6 +1145,87 @@ impl<B: Brush> Drop for BreakLines<'_, B> {
     }
 }
 
+/// Apply UAX #9 L1 after line breaking, before visual reordering. A shaped run
+/// may contain both visible text and the new line's trailing whitespace, so
+/// split only its line-local view; shaping data and source offsets stay intact.
+fn reset_line_end_bidi_levels<B: Brush>(
+    layout: &LayoutData<B>,
+    lines: &mut LineLayout,
+    line_idx: usize,
+) {
+    let line = &mut lines.lines[line_idx];
+    for index in line.item_range.clone().rev() {
+        let item = &mut lines.line_items[index];
+        if item.kind == LayoutItemKind::InlineBox {
+            if layout.inline_boxes[item.index].kind == InlineBoxKind::InFlow {
+                break;
+            }
+            continue;
+        }
+        let start = item.cluster_range.start;
+        let clusters = &layout.clusters[item.cluster_range.clone()];
+        let trailing_start = start
+            + clusters
+                .iter()
+                .rposition(|cluster| {
+                    let class =
+                        parley_data::Properties::get(cluster.info.source_char()).bidi_class();
+                    !crate::bidi::is_reset_at_line_end(class)
+                })
+                .map_or(0, |index| index + 1);
+        if trailing_start == start {
+            item.bidi_level = layout.base_level;
+            continue;
+        }
+        if trailing_start < item.cluster_range.end && item.bidi_level != layout.base_level {
+            let text_offset = layout.clusters[trailing_start]
+                .text_range(&layout.runs[item.index])
+                .start;
+            let mut whitespace = item.clone();
+            whitespace.cluster_range.start = trailing_start;
+            whitespace.text_range.start = text_offset;
+            whitespace.bidi_level = layout.base_level;
+            item.cluster_range.end = trailing_start;
+            item.text_range.end = text_offset;
+            lines.line_items.insert(index + 1, whitespace);
+            line.item_range.end += 1;
+        }
+        break;
+    }
+}
+
+/// Walk backward from the logical line end. Out-of-flow items do not stop
+/// the whitespace run, including when they split it into several text items.
+fn trailing_whitespace_advance<'a, B: Brush>(
+    layout: &LayoutData<B>,
+    items: impl Iterator<Item = &'a LineItemData>,
+) -> f32 {
+    fn whitespace_advance<'a>(clusters: impl Iterator<Item = &'a ClusterData>) -> f32 {
+        clusters
+            .take_while(|cluster| cluster.info.whitespace() != Whitespace::None)
+            .map(|cluster| cluster.advance)
+            .sum()
+    }
+    let mut advance = 0.0;
+    for item in items {
+        match item.kind {
+            LayoutItemKind::InlineBox => {
+                if layout.inline_boxes[item.index].kind == InlineBoxKind::InFlow {
+                    break;
+                }
+            }
+            LayoutItemKind::TextRun => {
+                let clusters = &layout.clusters[item.cluster_range.clone()];
+                advance += whitespace_advance(clusters.iter().rev());
+                if !item.is_whitespace {
+                    break;
+                }
+            }
+        }
+    }
+    advance
+}
+
 fn commit_line<B: Brush>(
     layout: &Layout<B>,
     lines: &mut LineLayout,
@@ -1185,11 +1263,10 @@ fn commit_line<B: Brush>(
                     kind: LayoutItemKind::InlineBox,
                     index: item.index,
                     bidi_level: item.bidi_level,
-                    advance: inline_box.width,
+                    advance: inline_box.advance(),
 
                     // These properties are ignored for inline boxes. So we just put a dummy value.
                     is_whitespace: false,
-                    has_trailing_whitespace: false,
                     cluster_range: 0..0,
                     text_range: 0..0,
                 });
@@ -1239,7 +1316,6 @@ fn commit_line<B: Brush>(
                     bidi_level: run_data.bidi_level,
                     advance: 0.,
                     is_whitespace: false,
-                    has_trailing_whitespace: false,
                     cluster_range,
                     text_range,
                 });

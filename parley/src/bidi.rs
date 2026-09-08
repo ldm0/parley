@@ -739,7 +739,7 @@ const BIDI_MASK: u32 = EXPLICIT_MASK
     | mask(BidiClass::RightToLeft)
     | mask(BidiClass::ArabicLetter)
     | mask(BidiClass::ArabicNumber);
-const _RESET_MASK: u32 =
+const RESET_MASK: u32 =
     ISOLATE_MASK | mask(BidiClass::PopDirectionalIsolate) | mask(BidiClass::WhiteSpace);
 
 fn is_isolate_initiator(ty: BidiClass) -> bool {
@@ -750,8 +750,14 @@ pub(crate) fn is_removed_by_x9(ty: BidiClass) -> bool {
     mask(ty) & REMOVED_BY_X9_MASK != 0
 }
 
-pub(crate) fn _is_reset(ty: BidiClass) -> bool {
-    mask(ty) & _RESET_MASK != 0
+/// Characters whose resolved levels are reset at a line boundary by UAX #9 L1.
+pub(crate) fn is_reset_at_line_end(ty: BidiClass) -> bool {
+    mask(ty)
+        & (RESET_MASK
+            | REMOVED_BY_X9_MASK
+            | mask(BidiClass::ParagraphSeparator)
+            | mask(BidiClass::SegmentSeparator))
+        != 0
 }
 
 fn find_limit(types: &[BidiClass], offset: usize, ty: BidiClass) -> usize {

@@ -18,6 +18,16 @@ pub struct InlineBox {
     pub height: f32,
 }
 
+impl InlineBox {
+    /// The box's contribution to inline flow, independently of its own size.
+    pub(crate) const fn advance(&self) -> f32 {
+        match self.kind {
+            InlineBoxKind::InFlow => self.width,
+            InlineBoxKind::OutOfFlow | InlineBoxKind::CustomOutOfFlow => 0.0,
+        }
+    }
+}
+
 /// Whether a box is in-flow (takes up space in the layout) or out-of-flow (e.g. absolutely positioned)
 /// or custom-out-of-flow (line-breaking should yield control flow)
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -26,8 +36,9 @@ pub enum InlineBoxKind {
     ///
     /// They correspond to `display: inline-block` boxes in CSS.
     InFlow,
-    /// `OutOfFlow` boxes are assigned a position as if they were a zero-sized inline box, but
-    /// do not take up space in the layout.
+    /// `OutOfFlow` boxes are assigned a position without taking up space or
+    /// introducing a line-break opportunity. They do not interrupt the text's
+    /// whitespace, wrapping, or intrinsic-width state.
     ///
     /// They correspond to `position: absolute` boxes in CSS.
     OutOfFlow,
