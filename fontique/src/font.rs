@@ -90,17 +90,18 @@ impl FontInfo {
     pub fn synthesis(&self, width: FontWidth, style: FontStyle, weight: FontWeight) -> Synthesis {
         let mut synth = Synthesis::default();
         let mut len = 0_usize;
-        if self.has_width_axis() && self.width != width {
+        // Attribute overrides affect face matching, not the physical default
+        // of an axis in the font file. Always send requested variable-axis
+        // values, even when they equal the overridden matching attributes.
+        if self.has_width_axis() {
             synth.vars[len] = (Tag::new(b"wdth"), width.percentage());
             len += 1;
         }
-        if self.weight != weight {
-            if self.has_weight_axis() {
-                synth.vars[len] = (Tag::new(b"wght"), weight.value());
-                len += 1;
-            } else if weight.value() > self.weight.value() {
-                synth.embolden = true;
-            }
+        if self.has_weight_axis() {
+            synth.vars[len] = (Tag::new(b"wght"), weight.value());
+            len += 1;
+        } else if weight.value() > self.weight.value() {
+            synth.embolden = true;
         }
         if self.style != style {
             match style {
@@ -477,4 +478,70 @@ pub struct FontInfoOverride<'a> {
     /// Default values for the font's variation axes. Axes not included within
     /// the font will be ignored.
     pub axes: Option<&'a [(Tag, f32)]>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Collection, CollectionOptions};
+    use alloc::sync::Arc;
+
+    #[test]
+    fn matching_overrides_do_not_erase_requested_variable_axes() {
+        let bytes: &[u8] = include_bytes!(
+            "../../parley_dev/assets/fonts/roboto_fonts/RobotoFlex-VariableFont.ttf"
+        );
+        let mut collection = Collection::new(CollectionOptions {
+            system_fonts: false,
+            shared: false,
+        });
+        let width = FontWidth::from_percentage(75.0);
+        let weight = FontWeight::new(100.0);
+        let registered = collection.register_fonts(
+            Blob::new(Arc::new(bytes)),
+            Some(FontInfoOverride {
+                width: Some(width),
+                weight: Some(weight),
+                ..Default::default()
+            }),
+        );
+        let font = &registered[0].1[0];
+        let synthesis = font.synthesis(width, FontStyle::Normal, weight);
+        assert!(
+            synthesis
+                .variation_settings()
+                .contains(&(Tag::new(b"wdth"), 75.0))
+        );
+        assert!(
+            synthesis
+                .variation_settings()
+                .contains(&(Tag::new(b"wght"), 100.0))
+        );
+        assert!(!synthesis.embolden());
+    }
+
+    #[test]
+    fn static_attribute_overrides_still_control_synthetic_weight() {
+        let bytes: &[u8] =
+            include_bytes!("../../parley_dev/assets/fonts/roboto_fonts/Roboto-Regular.ttf");
+        let mut collection = Collection::new(CollectionOptions {
+            system_fonts: false,
+            shared: false,
+        });
+        let registered = collection.register_fonts(
+            Blob::new(Arc::new(bytes)),
+            Some(FontInfoOverride {
+                weight: Some(FontWeight::new(625.0)),
+                ..Default::default()
+            }),
+        );
+        let font = &registered[0].1[0];
+        let matching = font.synthesis(FontWidth::NORMAL, FontStyle::Normal, FontWeight::new(625.0));
+        assert!(matching.variation_settings().is_empty());
+        assert!(!matching.embolden());
+        assert!(
+            font.synthesis(FontWidth::NORMAL, FontStyle::Normal, FontWeight::new(700.0))
+                .embolden()
+        );
+    }
 }
