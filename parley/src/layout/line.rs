@@ -3,7 +3,7 @@
 
 use crate::layout::Style;
 use crate::layout::data::BreakReason;
-use crate::layout::data::{LayoutItemKind, LineData};
+use crate::layout::data::{LayoutData, LayoutItemKind, LineData, LineItemData};
 use crate::layout::glyph::Glyph;
 use crate::layout::layout::Layout;
 use crate::layout::run::Run;
@@ -15,11 +15,30 @@ use core::ops::Range;
 #[derive(Copy, Clone)]
 pub struct Line<'a, B: Brush> {
     pub(crate) layout: &'a Layout<B>,
+    pub(crate) lines: LineLayoutView<'a>,
     pub(crate) index: u32,
     pub(crate) data: &'a LineData,
 }
 
 impl<'a, B: Brush> Line<'a, B> {
+    /// The line's origin in the block direction, including caller-selected
+    /// gaps such as clearance around floats.
+    pub fn block_offset(&self) -> f32 {
+        self.data.block_offset
+    }
+
+    /// The space occupied by this line in the block direction. Defaults to
+    /// its typographic line height, but a line-layout caller may resolve a
+    /// different size without changing the shaped font metrics.
+    pub fn block_advance(&self) -> f32 {
+        self.data.block_advance
+    }
+
+    /// Whether the paragraph containing this line is right-to-left.
+    pub fn is_rtl(&self) -> bool {
+        self.layout.is_rtl()
+    }
+
     /// Returns the metrics for the line.
     pub fn metrics(&self) -> &LineMetrics {
         &self.data.metrics
@@ -51,11 +70,12 @@ impl<'a, B: Brush> Line<'a, B> {
         if index >= self.data.item_range.end {
             return None;
         }
-        let item = self.layout.data.line_items.get(index)?;
+        let item = self.lines.items.get(index)?;
 
         Some(match item.kind {
             LayoutItemKind::TextRun => LineItem::Run(Run {
                 layout: self.layout,
+                lines: self.lines,
                 line_index: self.index,
                 index: original_index as u32,
                 data: self.layout.data.runs.get(item.index)?,
@@ -75,13 +95,14 @@ impl<'a, B: Brush> Line<'a, B> {
     /// Returns an iterator over the non-glyph runs and inline boxes for the line.
     pub(crate) fn items_nonpositioned(&self) -> impl Iterator<Item = LineItem<'a, B>> + Clone {
         let copy = self.clone();
-        let line_items = &copy.layout.data.line_items[self.data.item_range.clone()];
+        let line_items = &copy.lines.items[self.data.item_range.clone()];
         line_items
             .iter()
             .enumerate()
             .map(move |(item_index, line_data)| match line_data.kind {
                 LayoutItemKind::TextRun => LineItem::Run(Run {
                     layout: copy.layout,
+                    lines: copy.lines,
                     line_index: copy.index,
                     index: item_index as u32,
                     data: &copy.layout.data.runs[line_data.index],
@@ -101,6 +122,54 @@ impl<'a, B: Brush> Line<'a, B> {
             glyph_start: 0,
             offset: 0.,
         }
+    }
+}
+
+/// A borrowed result collection, independent of the shared shaping data.
+/// The same line/run/cluster views work both during incremental line layout
+/// and after the completed collection has been returned to Layout.
+#[derive(Clone, Copy)]
+pub(crate) struct LineLayoutView<'a> {
+    pub(crate) lines: &'a [LineData],
+    pub(crate) items: &'a [LineItemData],
+}
+
+impl<'a> LineLayoutView<'a> {
+    pub(crate) fn from_layout<B: Brush>(data: &'a LayoutData<B>) -> Self {
+        Self {
+            lines: &data.lines,
+            items: &data.line_items,
+        }
+    }
+
+    pub(crate) fn get<B: Brush>(self, layout: &'a Layout<B>, index: usize) -> Option<Line<'a, B>> {
+        Some(Line {
+            layout,
+            lines: self,
+            index: index as u32,
+            data: self.lines.get(index)?,
+        })
+    }
+
+    pub(crate) fn line_for_byte_index<B: Brush>(
+        self,
+        layout: &'a Layout<B>,
+        index: usize,
+    ) -> Option<(usize, Line<'a, B>)> {
+        use core::cmp::Ordering;
+        let line_index = self
+            .lines
+            .binary_search_by(|line| {
+                if index < line.text_range.start {
+                    Ordering::Greater
+                } else if index >= line.text_range.end {
+                    Ordering::Less
+                } else {
+                    Ordering::Equal
+                }
+            })
+            .ok()?;
+        Some((line_index, self.get(layout, line_index)?))
     }
 }
 
@@ -274,7 +343,7 @@ impl<'a, B: Brush> Iterator for GlyphRunIter<'a, B> {
                         + self.line.data.metrics.inline_min_coord
                         + self.line.data.metrics.offset;
 
-                    let bidi_level = self.line.layout.data.line_items
+                    let bidi_level = self.line.lines.items
                         [self.line.data.item_range.start + self.item_index]
                         .bidi_level;
                     self.item_index += 1;

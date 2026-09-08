@@ -437,6 +437,32 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         &mut self.state
     }
 
+    /// Borrow the last completed line while continuing paragraph layout.
+    /// Views share shaping data and support ordinary run/cluster navigation;
+    /// no line items or glyphs are copied or temporarily published to Layout.
+    pub fn last_line(&self) -> Option<crate::Line<'_, B>> {
+        let lines = super::line::LineLayoutView {
+            lines: &self.lines.lines,
+            items: &self.lines.line_items,
+        };
+        lines.get(self.layout, lines.lines.len().checked_sub(1)?)
+    }
+
+    /// Resolve the block-axis space of the last completed line before
+    /// continuing layout. This adjusts the next line's origin and the final
+    /// layout height, without changing font metrics, glyphs or text breaks.
+    /// For example, CSS vertical-align can expand a line beyond its fonts'
+    /// typographic height, or collapse a phantom line to zero.
+    pub fn set_last_line_block_advance(&mut self, advance: f32) {
+        assert!(
+            advance.is_finite() && advance >= 0.0,
+            "line block advance must be finite and nonnegative"
+        );
+        let line = self.lines.lines.last_mut().expect("a completed line");
+        self.state.line_y += f64::from(advance) - f64::from(line.block_advance);
+        line.block_advance = advance;
+    }
+
     fn trailing_collapsible_advance(&self) -> f32 {
         // Leading collapsed spaces have already been excluded from line.x.
         if !self.state.line.has_in_flow_content {
@@ -1262,6 +1288,8 @@ impl<'a, B: Brush> BreakLines<'a, B> {
         };
 
         let y = self.state.line_y;
+        line.block_offset = y as f32;
+        line.block_advance = line.metrics.line_height;
         line.metrics.baseline =
             ascent + leading_above + if quantize { y.round() as f32 } else { y as f32 };
 
@@ -1295,7 +1323,7 @@ impl<B: Brush> Drop for BreakLines<'_, B> {
             let line_max = line.metrics.inline_min_coord + line.metrics.advance + indent_extra;
             layout_full_width = layout_full_width.max(line_max);
             layout_width = layout_width.max(line_max - line.metrics.trailing_whitespace);
-            height += line.metrics.line_height as f64;
+            height = height.max(f64::from(line.block_offset) + f64::from(line.block_advance));
         }
 
         // If laying out with infinite width constraint, then set all lines' "max_width"
@@ -1311,7 +1339,7 @@ impl<B: Brush> Drop for BreakLines<'_, B> {
         // Don't include the last line's line_height in the layout's height if the last line is empty
         if let Some(last_line) = self.lines.lines.last() {
             if last_line.item_range.is_empty() {
-                height -= last_line.metrics.line_height as f64;
+                height -= f64::from(last_line.block_advance);
             }
         }
 

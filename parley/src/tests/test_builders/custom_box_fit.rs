@@ -9,7 +9,7 @@ use crate::{
     LayoutContext, LineEdgeWhitespace, LineHeight, StyleProperty, YieldData,
 };
 
-fn shape(
+pub(super) fn shape(
     text: &str,
     mode: LineEdgeWhitespace,
     direction: BaseDirection,

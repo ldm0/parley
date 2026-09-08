@@ -5,6 +5,7 @@ use crate::FontData;
 use crate::layout::cluster::{Cluster, ClusterPath};
 use crate::layout::data::{LineItemData, RunData};
 use crate::layout::layout::Layout;
+use crate::layout::line::LineLayoutView;
 use crate::style::Brush;
 use core::ops::Range;
 use fontique::Synthesis;
@@ -13,6 +14,7 @@ use fontique::Synthesis;
 #[derive(Copy, Clone)]
 pub struct Run<'a, B: Brush> {
     pub(crate) layout: &'a Layout<B>,
+    pub(crate) lines: LineLayoutView<'a>,
     pub(crate) line_index: u32,
     pub(crate) index: u32,
     pub(crate) data: &'a RunData,
@@ -29,6 +31,7 @@ impl<'a, B: Brush> Run<'a, B> {
     ) -> Self {
         Self {
             layout,
+            lines: LineLayoutView::from_layout(&layout.data),
             line_index,
             index,
             data,

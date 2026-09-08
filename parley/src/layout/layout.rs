@@ -103,11 +103,7 @@ impl<B: Brush> Layout<B> {
     /// Returns `None` if the index is out of bounds, i.e. if it's
     /// not less than [`self.len()`](Self::len).
     pub fn get(&self, index: usize) -> Option<Line<'_, B>> {
-        Some(Line {
-            index: index as u32,
-            layout: self,
-            data: self.data.lines.get(index)?,
-        })
+        super::line::LineLayoutView::from_layout(&self.data).get(self, index)
     }
 
     /// Returns `true` if the dominant direction of the layout is right-to-left.
@@ -132,6 +128,7 @@ impl<B: Brush> Layout<B> {
             .iter()
             .enumerate()
             .map(move |(index, data)| Line {
+                lines: super::line::LineLayoutView::from_layout(&self.data),
                 index: index as u32,
                 layout: self,
                 data,
@@ -177,25 +174,6 @@ impl<B: Brush> Layout<B> {
     pub fn align(&mut self, alignment: Alignment, options: AlignmentOptions) {
         unjustify(&mut self.data);
         align(&mut self.data, alignment, options);
-    }
-
-    /// Returns the index and `Line` object for the line containing the
-    /// given byte `index` in the source text.
-    pub(crate) fn line_for_byte_index(&self, index: usize) -> Option<(usize, Line<'_, B>)> {
-        let line_index = self
-            .data
-            .lines
-            .binary_search_by(|line| {
-                if index < line.text_range.start {
-                    Ordering::Greater
-                } else if index >= line.text_range.end {
-                    Ordering::Less
-                } else {
-                    Ordering::Equal
-                }
-            })
-            .ok()?;
-        Some((line_index, self.get(line_index)?))
     }
 
     /// Returns the index and `Line` object for the line containing the

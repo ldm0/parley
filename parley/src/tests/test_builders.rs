@@ -5,6 +5,7 @@
 
 mod custom_box_fit;
 mod inline_boundaries;
+mod line_commit;
 mod line_edge_whitespace;
 mod out_of_flow;
 

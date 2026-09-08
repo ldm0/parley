@@ -156,6 +156,9 @@ pub enum BreakReason {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub(crate) struct LineData {
+    /// Block-axis origin and occupied space, separate from font metrics.
+    pub(crate) block_offset: f32,
+    pub(crate) block_advance: f32,
     /// Range of the source text.
     pub(crate) text_range: Range<usize>,
     /// Range of line items.
